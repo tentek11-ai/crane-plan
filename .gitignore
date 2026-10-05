@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# IDE and operating system
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated and temporary files
+*.tmp
+*.log
+~$*
+work/
+tmp/
+outputs/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Original research inputs are kept locally and identified by hashes in registries.
+# They are not committed because some files are large and may contain project data.
+01_sources/**/*.pdf
+01_sources/**/*.doc
+01_sources/**/*.docx
+01_sources/**/*.dwg
+01_sources/**/*.dxf
+01_sources/**/*.html
+01_sources/**/*.htm
+01_sources/**/*_files/**
+
+# Generated exports and backups (keep directory placeholders)
+10_exports/*
+!10_exports/.gitkeep
+11_backups/*
+!11_backups/.gitkeep
+

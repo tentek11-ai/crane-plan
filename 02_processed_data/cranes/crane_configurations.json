@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "units": {"radius": "m", "capacity": "kg", "hook_height": "m"},
+  "configurations": [
+    {
+      "id": "LIEBHERR-130-ECB-6-60",
+      "manufacturer": "Liebherr",
+      "model": "130 EC-B 6",
+      "priority": 1,
+      "jib_length_m": 60.0,
+      "max_capacity_kg": 6000,
+      "max_free_standing_hook_height_m": 64.1,
+      "capacity_curve": [[20,6000],[22.5,6000],[25,6000],[27.5,5900],[30,5200],[32.5,4600],[35,4100],[37.5,3650],[40,3300],[42.5,2950],[45,2650],[47.5,2400],[50,2150],[52.5,1950],[55,1750],[57.5,1550],[60,1350]],
+      "source": "CRANE-CAT-001, full 60 m jib, conservative curve",
+      "status": "VERIFIED_FROM_CATALOG_TEXT"
+    },
+    {
+      "id": "LIEBHERR-130-ECB-8-60",
+      "manufacturer": "Liebherr",
+      "model": "130 EC-B 8 FR.tronic",
+      "priority": 2,
+      "jib_length_m": 60.0,
+      "max_capacity_kg": 8000,
+      "max_free_standing_hook_height_m": 67.5,
+      "capacity_curve": [[13.9,8000],[15,7340],[17.5,6180],[20,5320],[22.5,4650],[25,4110],[27.5,3670],[30,3310],[32.5,3000],[35,2730],[37.5,2500],[40,2300],[42.5,2120],[45,1970],[47.5,1830],[50,1700],[52.5,1590],[55,1480],[57.5,1390],[60,1300]],
+      "source": "CRANE-CAT-002, full 60 m jib",
+      "status": "VERIFIED_FROM_CATALOG_TEXT"
+    },
+    {
+      "id": "LIEBHERR-125-ECB-6-58",
+      "manufacturer": "Liebherr",
+      "model": "125 EC-B 6",
+      "priority": 3,
+      "jib_length_m": 58.0,
+      "max_capacity_kg": 6000,
+      "max_free_standing_hook_height_m": 50.0,
+      "capacity_curve": [[16.8,6000],[20,4990],[22.5,4390],[25,3910],[27.5,3520],[30,3190],[32.5,2900],[35,2660],[37.5,2450],[40,2270],[42.5,2100],[45,1960],[47.5,1820],[50,1710],[52.5,1600],[55,1500],[58,1400]],
+      "source": "CRANE-CAT-004, LM1, full 58 m jib; capacities valid to 50 m hook height",
+      "status": "VERIFIED_FROM_CATALOG_TEXT"
+    },
+    {
+      "id": "LIEBHERR-150-ECB-8-62.5",
+      "manufacturer": "Liebherr",
+      "model": "150 EC-B 8 Litronic",
+      "priority": 4,
+      "jib_length_m": 62.5,
+      "max_capacity_kg": 8000,
+      "max_free_standing_hook_height_m": 50.0,
+      "capacity_curve": [[13.6,8000],[14,7770],[16,6720],[18,5900],[20,5240],[22,4700],[24.4,4170],[26.9,3720],[30,3260],[32.5,2960],[35,2700],[37.5,2470],[40,2270],[42.5,2100],[45,1940],[47.5,1800],[50,1680],[52.5,1560],[55,1460],[57.5,1370],[60,1280],[62.5,1200]],
+      "source": "CRANE-CAT-005, LM1, full 62.5 m jib; capacities valid to 50 m hook height",
+      "status": "VERIFIED_FROM_CATALOG_TEXT"
+    },
+    {
+      "id": "LIEBHERR-280-ECH-12-75",
+      "manufacturer": "Liebherr",
+      "model": "280 EC-H 12 Litronic",
+      "priority": 10,
+      "jib_length_m": 75.0,
+      "max_capacity_kg": 12000,
+      "max_free_standing_hook_height_m": 78.7,
+      "capacity_curve": [[22,12000],[25,12000],[28,10860],[31,9560],[34,8500],[37,7640],[40,6920],[45,6310],[50,5470],[55,4800],[60,4250],[65,3800],[70,3410],[75,2800]],
+      "source": "CRANE-CAT-008, LM1, full 75 m jib",
+      "status": "VERIFIED_FROM_CATALOG_TEXT"
+    }
+  ],
+  "pending_models": ["132 EC-H 8 Litronic", "154 EC-H 6", "154 EC-H 10", "200 EC-H 10"]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "note": "Редактируемые стартовые значения по типовой номенклатуре монолитного строительства и структуре ППРк_Напрудная; перед работой сверяются с паспортами, накладными и картами строповки",
+  "loads": [
+    {"id":"reinforcement_bundle_6","name":"Пучок арматуры L=6 м","load_kg":5000,"rigging_kg":200,"length_m":6.0,"width_m":0.6,"height_m":0.6},
+    {"id":"reinforcement_bundle_12","name":"Пучок арматуры L=12 м","load_kg":5000,"rigging_kg":200,"length_m":12.0,"width_m":0.6,"height_m":0.6},
+    {"id":"formwork_enlarged","name":"Укрупнённый щит опалубки","load_kg":1000,"rigging_kg":200,"length_m":6.0,"width_m":0.3,"height_m":3.0},
+    {"id":"formwork_wall","name":"Щит стеновой опалубки","load_kg":110,"rigging_kg":210,"length_m":3.3,"width_m":0.3,"height_m":3.0},
+    {"id":"formwork_pack","name":"Пакет щитов опалубки и фанеры","load_kg":1000,"rigging_kg":200,"length_m":3.0,"width_m":1.5,"height_m":1.5},
+    {"id":"timber_pack","name":"Пакет пиломатериалов 1,5 м³","load_kg":1200,"rigging_kg":200,"length_m":6.0,"width_m":1.2,"height_m":1.0},
+    {"id":"gas_blocks","name":"Поддон газобетонных блоков","load_kg":1200,"rigging_kg":80,"length_m":1.2,"width_m":1.0,"height_m":1.5},
+    {"id":"facade_pack","name":"Пакет элементов вентфасада","load_kg":1000,"rigging_kg":80,"length_m":3.0,"width_m":1.2,"height_m":1.2},
+    {"id":"reinforcement_mesh_rolls","name":"Арматурные сетки в рулонах","load_kg":1000,"rigging_kg":200,"length_m":6.0,"width_m":1.2,"height_m":1.2},
+    {"id":"reinforcement_mesh_1","name":"Пакет арматурных сеток 1 т","load_kg":1000,"rigging_kg":200,"length_m":6.0,"width_m":2.0,"height_m":0.5},
+    {"id":"reinforcement_mesh_2","name":"Пакет арматурных сеток 2 т","load_kg":2000,"rigging_kg":200,"length_m":6.0,"width_m":2.0,"height_m":0.7},
+    {"id":"steel_beams","name":"Пакет металлических балок","load_kg":2000,"rigging_kg":200,"length_m":6.0,"width_m":1.0,"height_m":1.0},
+    {"id":"mortar_box","name":"Ящик с раствором 0,28 м³","load_kg":700,"rigging_kg":200,"length_m":1.4,"width_m":1.0,"height_m":0.8},
+    {"id":"concrete_bucket_1","name":"Бункер с бетонной смесью 1,0 м³","load_kg":2500,"rigging_kg":300,"length_m":1.8,"width_m":1.8,"height_m":2.4},
+    {"id":"concrete_bucket_05","name":"Бункер с бетонной смесью 0,5 м³","load_kg":1300,"rigging_kg":200,"length_m":1.4,"width_m":1.4,"height_m":2.0},
+    {"id":"bulk_bucket","name":"Бадья для сыпучих материалов","load_kg":1000,"rigging_kg":200,"length_m":1.5,"width_m":1.5,"height_m":1.7}
+  ]
+}

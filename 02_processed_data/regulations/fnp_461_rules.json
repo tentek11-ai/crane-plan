@@ -1,0 +1,32 @@
+{
+  "document": "Приказ Ростехнадзора от 26.11.2020 № 461",
+  "edition": "16.04.2026",
+  "effective_from": "2026-06-08",
+  "valid_until": "2032-09-01",
+  "rules": {
+    "vertical_clearance_m": {
+      "above_building_parts": 0.5,
+      "above_floors_or_platforms_with_people": 2.3,
+      "locator": "пункт 156, подпункт к"
+    },
+    "joint_crane_work_m": {
+      "working_horizontal_min": 5.0,
+      "overlapping_jib_levels_vertical_min": 1.0,
+      "parked_horizontal_min": 2.0,
+      "parked_vertical_min": 1.0,
+      "locator": "пункт 164"
+    },
+    "danger_zone": {
+      "locator": "приложение № 2, пункт 1, таблица 1",
+      "interpolation": "linear_between_upper_height_points",
+      "outside_range": "blocked",
+      "height_points_m": [10.0, 20.0, 70.0, 120.0, 200.0, 300.0, 450.0],
+      "load_fall_distance_m": [4.0, 7.0, 10.0, 15.0, 20.0, 25.0, 30.0],
+      "building_object_fall_distance_m": [3.5, 5.0, 7.0, 10.0, 15.0, 20.0, 25.0]
+    },
+    "approach_to_danger_zone_m": {
+      "slow_slew_threshold": 7.0,
+      "locator": "пункт 156, подпункт ж"
+    }
+  }
+}
