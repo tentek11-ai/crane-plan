@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from html import escape
-from math import atan2, cos, hypot, pi, sin
+from math import atan2, cos, hypot, pi, radians, sin
 from pathlib import Path
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
@@ -17,13 +17,26 @@ from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.lib.utils import ImageReader
 
-from .geometry import offset_polygon, polygon_bounds, polygon_centroid
+from .geometry import distance_to_polygon, offset_polygon, polygon_bounds, polygon_centroid
 from .models import ProjectInput, ScenarioResult
 from .normative import NormativeInputError, danger_zone_offset_from_outer_edge
 from .pdf_workspace import render_page
+from .tieins import horizontal_intersections
 
 NAVY = colors.HexColor("#17365D")
 RED = colors.HexColor("#C00000")
+
+
+def _sector_text(start, end, decimals=1):
+    """Показать сектор в диапазоне 0–360°, разделив переход через ноль."""
+    if start is None or end is None:
+        return "не назначен"
+    if end-start >= 359.999:
+        return "0°…360°"
+    raw_end=end; start=start%360; finish=end%360; fmt=f"{{:.{decimals}f}}°"
+    if start<=finish and raw_end<=360:
+        return f"{fmt.format(start)}…{fmt.format(finish)}"
+    return f"{fmt.format(start)}…360°; 0°…{fmt.format(finish)}"
 
 
 def _font() -> str:
@@ -111,15 +124,21 @@ def _draw_lattice(canvas, start, end, width=3*mm, panels=8):
 
 
 def _draw_tower_crane_plan(canvas, center, target, reach, color, label):
-    """Узнаваемое условное изображение башенного крана в плане."""
+    """Flat-top EC-B silhouette based on the manufacturer's arrangement."""
     x,y=center; tx,ty=target; length=max(hypot(tx-x,ty-y),1); ux=(tx-x)/length; uy=(ty-y)/length
     jib=max(22*mm,reach); counter=min(24*mm,jib*.28)
     canvas.setStrokeColor(color); canvas.setFillColor(colors.white); canvas.setLineWidth(.8)
-    canvas.rect(x-4*mm,y-4*mm,8*mm,8*mm,stroke=1,fill=1); canvas.line(x-4*mm,y-4*mm,x+4*mm,y+4*mm); canvas.line(x-4*mm,y+4*mm,x+4*mm,y-4*mm)
+    canvas.rect(x-3.4*mm,y-3.4*mm,6.8*mm,6.8*mm,stroke=1,fill=1); canvas.line(x-3.4*mm,y-3.4*mm,x+3.4*mm,y+3.4*mm); canvas.line(x-3.4*mm,y+3.4*mm,x+3.4*mm,y-3.4*mm)
+    canvas.circle(x,y,4.4*mm,stroke=1,fill=0)
     _draw_lattice(canvas,(x,y),(x+ux*jib,y+uy*jib),3.2*mm,max(6,int(jib/(8*mm))))
     _draw_lattice(canvas,(x,y),(x-ux*counter,y-uy*counter),4*mm,4)
-    canvas.setFillColor(color); canvas.rect(x-ux*(counter+4*mm)-2*mm,y-uy*(counter+4*mm)-2*mm,4*mm,4*mm,stroke=1,fill=1)
-    trolley=(x+ux*jib*.72,y+uy*jib*.72); canvas.circle(*trolley,1.2*mm,stroke=1,fill=0)
+    # EC-B counterweight packet and machinery deck at the short counter-jib.
+    canvas.setFillColor(color)
+    for shift in (0,3*mm,6*mm):
+        bx=x-ux*(counter+2*mm)-uy*shift/3; by=y-uy*(counter+2*mm)+ux*shift/3
+        canvas.rect(bx-1.7*mm,by-1.7*mm,3.4*mm,3.4*mm,stroke=1,fill=1)
+    cabin=(x+ux*5*mm-uy*4*mm,y+uy*5*mm+ux*4*mm); canvas.rect(cabin[0]-2*mm,cabin[1]-1.6*mm,4*mm,3.2*mm,stroke=1,fill=0)
+    trolley=(x+ux*jib*.72,y+uy*jib*.72); canvas.rect(trolley[0]-1.2*mm,trolley[1]-1.2*mm,2.4*mm,2.4*mm,stroke=1,fill=0)
     canvas.setFont(_font(),7); canvas.drawString(x+5*mm,y+5*mm,label)
 
 
@@ -154,27 +173,36 @@ def _draw_tower_protection(canvas, center, radius, color):
     canvas.circle(center[0],center[1],radius,stroke=1,fill=1); canvas.setDash(); canvas.restoreState()
 
 
-def _draw_tower_crane_elevation(canvas, base_x, base_y, top_y, jib_half, color, label):
-    """Фасад башенного крана: решётчатая башня, стрела, противострела и крюк."""
+def _draw_tower_crane_elevation(canvas, base_x, base_y, top_y, jib_half, color, label, direction=1):
+    """Recognisable Liebherr EC-B flat-top crane elevation."""
     mast_w=7*mm; canvas.setStrokeColor(color); canvas.setFillColor(colors.white); canvas.setLineWidth(.8)
     canvas.rect(base_x-mast_w/2,base_y,mast_w,max(top_y-base_y,8*mm),stroke=1,fill=0)
     segments=max(2,int(max(top_y-base_y,8*mm)/(11*mm)))
     for index in range(segments):
         y1=base_y+(top_y-base_y)*index/segments; y2=base_y+(top_y-base_y)*(index+1)/segments
         canvas.line(base_x-mast_w/2,y1,base_x+mast_w/2,y2); canvas.line(base_x+mast_w/2,y1,base_x-mast_w/2,y2)
-    canvas.rect(base_x-5*mm,base_y-2*mm,10*mm,2*mm,stroke=1,fill=0)
-    _draw_lattice(canvas,(base_x,top_y),(base_x+jib_half,top_y),4*mm,max(6,int(jib_half/(8*mm))))
-    _draw_lattice(canvas,(base_x,top_y),(base_x-jib_half*.38,top_y),4.5*mm,5)
-    canvas.rect(base_x-jib_half*.38-5*mm,top_y-3*mm,5*mm,6*mm,stroke=1,fill=0)
-    canvas.rect(base_x+2*mm,top_y-7*mm,6*mm,6*mm,stroke=1,fill=0)
-    hook_x=base_x+jib_half*.78; canvas.line(hook_x,top_y-2*mm,hook_x,base_y+8*mm); canvas.circle(hook_x,base_y+6*mm,1.7*mm,stroke=1,fill=0)
+    # Cross base, climbing frame, slewing ring and machinery platform.
+    canvas.rect(base_x-7*mm,base_y-2*mm,14*mm,2*mm,stroke=1,fill=0); canvas.line(base_x-7*mm,base_y-2*mm,base_x-3*mm,base_y+3*mm); canvas.line(base_x+7*mm,base_y-2*mm,base_x+3*mm,base_y+3*mm)
+    canvas.rect(base_x-mast_w*.72,top_y-14*mm,mast_w*1.44,14*mm,stroke=1,fill=0); canvas.circle(base_x,top_y,2.2*mm,stroke=1,fill=0)
+    main_end=base_x+direction*jib_half; counter_end=base_x-direction*jib_half*.31
+    _draw_lattice(canvas,(base_x,top_y),(main_end,top_y),4*mm,max(7,int(jib_half/(7*mm))))
+    _draw_lattice(canvas,(base_x,top_y),(counter_end,top_y),5*mm,5)
+    # Counterweight packet, winch and cabin under the root - characteristic EC-B layout.
+    for block in range(4):
+        x=counter_end-direction*(block*2.2*mm); canvas.rect(x-1.1*mm,top_y-4.5*mm,2.2*mm,8*mm,stroke=1,fill=0)
+    canvas.rect(base_x-direction*10*mm,top_y+2.2*mm,6*mm,2.5*mm,stroke=1,fill=0)
+    cabin_x=base_x+direction*4.5*mm; path=canvas.beginPath(); path.moveTo(cabin_x,top_y-1*mm); path.lineTo(cabin_x+direction*7*mm,top_y-1*mm); path.lineTo(cabin_x+direction*6*mm,top_y-8*mm); path.lineTo(cabin_x,top_y-7*mm); path.close(); canvas.drawPath(path,stroke=1,fill=0)
+    trolley_x=base_x+direction*jib_half*.78; canvas.rect(trolley_x-1.5*mm,top_y-3*mm,3*mm,3*mm,stroke=1,fill=0)
+    canvas.line(trolley_x-1*mm,top_y-3*mm,trolley_x-1*mm,base_y+10*mm); canvas.line(trolley_x+1*mm,top_y-3*mm,trolley_x+1*mm,base_y+10*mm)
+    canvas.rect(trolley_x-2*mm,base_y+7*mm,4*mm,3*mm,stroke=1,fill=0); canvas.line(trolley_x,base_y+7*mm,trolley_x,base_y+4*mm); canvas.arc(trolley_x-1.8*mm,base_y+1*mm,trolley_x+1.8*mm,base_y+5*mm,startAng=180,extent=250)
     canvas.setFillColor(color); canvas.setFont(_font(),7); canvas.drawString(base_x+7*mm,top_y+5*mm,label)
 
 
-def _pdf_layout(source: Path, render_scale: float, left: float, bottom: float, draw_w: float, draw_h: float):
+def _pdf_layout(source: Path, render_scale: float, left: float, bottom: float, draw_w: float, draw_h: float, crop_box=(0.0,0.0,1.0,1.0)):
     from pypdf import PdfReader
     page=PdfReader(str(source)).pages[0]
-    pixel_w=float(page.mediabox.width)*render_scale; pixel_h=float(page.mediabox.height)*render_scale
+    x0,y0,x1,y1=crop_box
+    pixel_w=float(page.mediabox.width)*render_scale*(x1-x0); pixel_h=float(page.mediabox.height)*render_scale*(y1-y0)
     scale=min(draw_w/pixel_w,draw_h/pixel_h)
     shown_w,shown_h=pixel_w*scale,pixel_h*scale
     return left+(draw_w-shown_w)/2,bottom+(draw_h-shown_h)/2,shown_w,shown_h,scale
@@ -198,9 +226,9 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
     left,bottom=22*mm,48*mm; draw_w,draw_h=width-29*mm,height-68*mm; transform=None
     source=Path(project.source_plan_pdf) if project.source_plan_pdf else None
     if source and source.exists() and project.plan_m_per_pixel>0:
-        left,bottom,shown_w,shown_h,scale=_pdf_layout(source,project.plan_render_scale,left,bottom,draw_w,draw_h)
+        left,bottom,shown_w,shown_h,scale=_pdf_layout(source,project.plan_render_scale,left,bottom,draw_w,draw_h,project.plan_crop_box)
         if draw_source:
-            image=render_page(source,0,project.plan_render_scale)
+            image=render_page(source,0,project.plan_render_scale,project.plan_crop_box,project.plan_background_intensity)
             canvas.drawImage(ImageReader(image),left,bottom,shown_w,shown_h,preserveAspectRatio=True,mask="auto")
         def transform(point):
             px=project.plan_origin_x_px+point[0]/project.plan_m_per_pixel
@@ -238,6 +266,9 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
         physical_radius=placement.jib_length_m or placement.max_radius_m
         x,y=transform((placement.x,placement.y)); rx,_=transform((placement.x+physical_radius,placement.y)); radius=abs(rx-x)
         color=crane_colors[(index-1)%len(crane_colors)]; canvas.setStrokeColor(color); canvas.setLineWidth(.9); canvas.setDash(6,3); canvas.circle(x,y,radius,stroke=1,fill=0); canvas.setDash()
+        if placement.radial_limits_m:
+            envelope=[(placement.x+limit*cos(radians(angle)),placement.y+limit*sin(radians(angle))) for angle,limit in placement.radial_limits_m]
+            _draw_polygon(canvas,envelope,transform,color,None,1.6)
         if scenario.joint_plan:
             tower_edge,_=transform((placement.x+scenario.joint_plan.tower_protection_radius_m,placement.y)); _draw_tower_protection(canvas,(x,y),abs(tower_edge-x),color)
         inner=0.0
@@ -254,40 +285,97 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
 
 
 def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, number: int, draw_source: bool = True) -> None:
-    font=_font(); width,height=landscape(A4); canvas.saveState(); canvas.setFont(font,14); canvas.setFillColor(NAVY)
+    font=_font(); width,height=landscape(A3); canvas.saveState(); canvas.setFont(font,14); canvas.setFillColor(NAVY)
     canvas.drawString(22*mm,height-13*mm,f"ВЫСОТНАЯ ПРИВЯЗКА. Вариант {number}")
     left,bottom=22*mm,48*mm; draw_w,draw_h=width-29*mm,height-68*mm
     source=Path(project.source_section_pdf) if project.source_section_pdf else None
     calibrated=bool(source and source.exists() and project.section_m_per_pixel>0)
+    section_transform=None
     if calibrated:
-        left,bottom,shown_w,shown_h,scale=_pdf_layout(source,project.section_render_scale,left,bottom,draw_w,draw_h)
+        left,bottom,shown_w,shown_h,scale=_pdf_layout(source,project.section_render_scale,left,bottom,draw_w,draw_h,project.section_crop_box)
         if draw_source:
-            image=render_page(source,0,project.section_render_scale)
+            image=render_page(source,0,project.section_render_scale,project.section_crop_box,project.section_background_intensity)
             canvas.drawImage(ImageReader(image),left,bottom,shown_w,shown_h,preserveAspectRatio=True,mask="auto")
         def cv_height(value):
             px=project.section_origin_x_px+project.section_axis_dx*(value/project.section_m_per_pixel)
             py=project.section_origin_y_px+project.section_axis_dy*(value/project.section_m_per_pixel)
             return left+px*scale,bottom+(shown_h/scale-py)*scale
+        def section_transform(point):
+            horizontal,value=point; ux,uy=project.section_axis_dx,project.section_axis_dy
+            px=project.section_origin_x_px+(value*ux+horizontal*uy)/project.section_m_per_pixel
+            py=project.section_origin_y_px+(value*uy-horizontal*ux)/project.section_m_per_pixel
+            return left+px*scale,bottom+(shown_h/scale-py)*scale
     else:
-        origin=(70*mm,35*mm); available=height-65*mm; max_height=max([(p.jib_level_m or p.required_hook_height_m) for p in scenario.placements]+[project.parapet_m-project.pit_bottom_m,1])
+        origin=(70*mm,35*mm); available=height-65*mm; max_height=max([(p.accepted_crane_height_m or p.jib_level_m or p.required_hook_height_m) for p in scenario.placements]+[project.parapet_m-project.pit_bottom_m,1])
         cv_height=lambda value:(origin[0],origin[1]+value/max_height*available)
+        section_transform=lambda point:(origin[0]+point[0]*mm,origin[1]+point[1]/max_height*available)
     ox,oy=cv_height(0); px,py=cv_height(project.parapet_m-project.pit_bottom_m)
-    canvas.setStrokeColor(colors.HexColor("#0066CC")); canvas.setLineWidth(3); canvas.line(ox+25*mm,oy,px+25*mm,py)
-    canvas.setFont(font,8); canvas.setFillColor(colors.HexColor("#0066CC")); canvas.drawString(px+28*mm,py,f"Верх парапета {project.parapet_m:g} м")
-    canvas.setFillColor(colors.black); canvas.drawString(ox+28*mm,oy,f"Низ котлована {project.pit_bottom_m:g} м")
+    building_height=project.parapet_m-project.pit_bottom_m
+    building_x=ox+25*mm
+    if project.section_building_contour:
+        _draw_polygon(canvas,project.section_building_contour,section_transform,colors.HexColor("#0066CC"),colors.HexColor("#EAF3F8"),1.5)
+        transformed=[section_transform(point) for point in project.section_building_contour]; building_x=sum(x for x,_ in transformed)/len(transformed)
+        min_h=min(point[0] for point in project.section_building_contour); max_h=max(point[0] for point in project.section_building_contour)
+        for floor in range(1,project.floors):
+            level=building_height*floor/project.floors; x1,y=section_transform((min_h,level)); x2,_=section_transform((max_h,level))
+            canvas.setStrokeColor(colors.HexColor("#8EA9C1")); canvas.setLineWidth(.35); canvas.line(x1,y,x2,y)
+            if floor%max(1,project.floors//10)==0: canvas.setFont(font,5.5); canvas.setFillColor(colors.HexColor("#5B748A")); canvas.drawString(x2+1*mm,y,f"эт. {floor}")
+    else:
+        # Без обведённого контура показываем здание отдельной условной
+        # вертикалью, не совмещая её с башней второго крана.
+        building_x=width*.56
+        canvas.setStrokeColor(colors.HexColor("#0066CC")); canvas.setLineWidth(3); canvas.line(building_x,oy,building_x,py)
+        canvas.setLineWidth(.5)
+        for floor in range(1,max(project.floors,1)):
+            _,floor_y=cv_height(building_height*floor/max(project.floors,1))
+            canvas.line(building_x-18*mm,floor_y,building_x+18*mm,floor_y)
+    canvas.setFont(font,8); canvas.setFillColor(colors.HexColor("#0066CC")); canvas.drawString(building_x+3*mm,py,f"Верх парапета {project.parapet_m:g} м")
+    canvas.setFillColor(colors.black); canvas.drawString(building_x+3*mm,oy,f"Низ котлована {project.pit_bottom_m:g} м")
     display_positions={index: ox for index in range(len(scenario.placements))}
     jib_scale=1.0*mm
-    if scenario.joint_plan and len(scenario.placements)>=2:
+    if project.section_building_contour:
+        building_canvas_x=[section_transform(point)[0] for point in project.section_building_contour]
+        min_building_x,max_building_x=min(building_canvas_x),max(building_canvas_x)
+        horizontal_scale=abs(section_transform((1.0,0.0))[0]-section_transform((0.0,0.0))[0]) or mm
+        for placement_index,placement in enumerate(scenario.placements):
+            offset=max(2*mm,distance_to_polygon((placement.x,placement.y),project.site.building)*horizontal_scale)
+            display_positions[placement_index]=(min_building_x-offset if placement_index%2==0 else max_building_x+offset)
+    elif scenario.joint_plan and len(scenario.placements)>=2:
         higher=scenario.joint_plan.higher_crane_index-1; lower=1-higher
         separation=max(36*mm,min(90*mm,scenario.joint_plan.axis_distance_m*jib_scale))
         display_positions[lower]=ox-separation/2
         display_positions[higher]=ox+separation/2
+    schedule_rows=[["Кран / прист.","Отметка","Этаж","Секц.","H крана","Тяга"]]
     for index,placement in enumerate(scenario.placements,1):
-        jib_level=placement.jib_level_m or placement.required_hook_height_m
+        jib_level=placement.accepted_crane_height_m or placement.jib_level_m or placement.required_hook_height_m
         _,ty=cv_height(jib_level); color=[colors.HexColor("#004C99"),colors.HexColor("#C05000")][(index-1)%2]
         base_x=display_positions[index-1]
         jib_visual=max(15*mm,min(70*mm,(placement.jib_length_m or placement.max_radius_m)*jib_scale))
-        _draw_tower_crane_elevation(canvas,base_x,oy,ty,jib_visual,color,f"К{index} {placement.model}; L={placement.jib_length_m:.1f}; Hстр={jib_level:.1f}; Hкр≥{placement.required_hook_height_m:.1f} м")
+        direction=1 if building_x>=base_x else -1
+        _draw_tower_crane_elevation(canvas,base_x,oy,ty,jib_visual,color,f"К{index} {placement.model}; L={placement.jib_length_m:.1f}; H={jib_level:.1f}; Hтр≥{placement.required_hook_height_m:.1f} м",direction)
+        if placement.max_free_standing_height_m:
+            _,free_y=cv_height(placement.max_free_standing_height_m); canvas.setStrokeColor(color); canvas.setDash(3,2); canvas.line(base_x-8*mm,free_y,base_x+8*mm,free_y); canvas.setDash(); canvas.setFont(font,5.5); canvas.setFillColor(color); canvas.drawString(base_x+9*mm,free_y,f"Hсв={placement.max_free_standing_height_m:.1f}")
+        for stage_index,level in enumerate(placement.tie_in_levels_m):
+            _,tie_y=cv_height(level); target_x=building_x
+            intersections=horizontal_intersections(project.section_building_contour,level)
+            if intersections:
+                targets=[section_transform((value,level))[0] for value in intersections]; target_x=min(targets,key=lambda value:abs(value-base_x))
+            canvas.setStrokeColor(colors.HexColor("#7A1FA2")); canvas.setLineWidth(2.0); canvas.line(base_x,tie_y,target_x,tie_y)
+            canvas.circle(base_x,tie_y,1.3*mm,stroke=1,fill=0); canvas.circle(target_x,tie_y,1.3*mm,stroke=1,fill=0)
+            sections=placement.tie_in_stage_sections[stage_index]; floor=placement.tie_nearest_floors[stage_index]
+            canvas.setFont(font,5.7); canvas.setFillColor(colors.HexColor("#7A1FA2")); tie_label=f"П{stage_index+1} +{sections} секц.; {level:.1f} м"
+            if target_x>=base_x: canvas.drawString(target_x+2*mm,tie_y+1.5*mm,tie_label)
+            else: canvas.drawRightString(target_x-2*mm,tie_y+1.5*mm,tie_label)
+            schedule_rows.append([f"К{index}/П{stage_index+1}",f"{level:.1f}",str(floor),str(sections),f"{placement.accepted_crane_height_m:.1f}",f"{project.tie_length_m:.1f}/{placement.required_tie_length_m:.1f}"])
+    if len(schedule_rows)>1:
+        table_widths=[15*mm,13*mm,10*mm,10*mm,15*mm,20*mm]
+        _canvas_table(canvas,schedule_rows,width-sum(table_widths)-9*mm,height-20*mm,table_widths,font,5.2)
+        # Small plan inset: pair of ties at the specified angle, directed to the building.
+        cx,cy=width-48*mm,72*mm; ray=20*mm; half=radians(project.tie_angle_deg/2)
+        canvas.setStrokeColor(colors.HexColor("#7A1FA2")); canvas.setLineWidth(1.2); canvas.rect(cx-3*mm,cy-3*mm,6*mm,6*mm)
+        for angle in (-half,half): canvas.line(cx,cy,cx+ray*cos(angle),cy+ray*sin(angle))
+        canvas.setStrokeColor(colors.HexColor("#0066CC")); canvas.line(cx+ray*cos(half)+3*mm,cy-15*mm,cx+ray*cos(half)+3*mm,cy+15*mm)
+        canvas.setFillColor(colors.black); canvas.setFont(font,5.5); canvas.drawCentredString(cx+8*mm,cy-19*mm,f"План: две тяги {project.tie_length_m:.1f} м; угол {project.tie_angle_deg:.0f}°")
     if scenario.joint_plan:
         canvas.setFillColor(RED); canvas.setFont(font,7)
         joint=scenario.joint_plan; canvas.drawString(22*mm,53*mm,f"Разность осей стрел {joint.vertical_separation_m:.1f} м = высота конструкции {joint.jib_structural_height_m:.1f} м + свободный зазор 1.0 м.")
@@ -298,8 +386,8 @@ def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResul
             canvas.setStrokeColor(RED); canvas.setLineWidth(.7); canvas.line(dim_x,yl,dim_x,yh); canvas.line(dim_x-2*mm,yl,dim_x+2*mm,yl); canvas.line(dim_x-2*mm,yh,dim_x+2*mm,yh)
             canvas.drawString(dim_x+3*mm,(yl+yh)/2,"чистый зазор 1.0 м")
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
-    note="Привязка выполнена по двум точкам загруженного PDF-разреза." if calibrated else "Разрез не откалиброван: показана расчётная схема без привязки к исходному PDF."
-    canvas.drawString(22*mm,49*mm,note); canvas.drawRightString(width-7*mm,49*mm,"Проверить по паспорту крана и проекту пристёжек")
+    note="Привязка выполнена по двум точкам PDF-разреза. Схема пристёжек предварительная; узлы и нагрузки - отдельный проект." if calibrated else "Разрез не откалиброван: показана расчётная схема без привязки к исходному PDF."
+    canvas.drawString(105*mm,49*mm,note); canvas.drawRightString(width-7*mm,49*mm,"Проверить по паспорту крана и проекту пристёжек")
     _sheet_frame(canvas,project,"Высотная привязка башенного крана",str(number)); canvas.restoreState(); canvas.showPage()
 
 
@@ -460,14 +548,14 @@ def _coordination_page(canvas: Canvas, project: ProjectInput, scenario: Scenario
     table_x=292*mm; table_y=height-27*mm
     rows=[["Параметр","Расчётное значение"],["Расстояние между осями",f"{joint.axis_distance_m:.1f} м"],["Рабочий горизонтальный разрыв",f"не менее {joint.working_horizontal_clearance_m:.1f} м"],["Разведение осей стрел",f"{joint.vertical_separation_m:.1f} м = {joint.jib_structural_height_m:.1f} + 1.0"],["Стоянка: горизонталь / вертикаль",f"{joint.parking_horizontal_clearance_m:.1f} / 1.0 м"],["Защитный габарит башен",f"{joint.tower_protection_radius_m:.1f} + {joint.tower_protection_radius_m:.1f} = {joint.combined_tower_envelope_m:.1f} м"],["Площадь общей зоны",f"{joint.overlap_area_m2:.1f} м²"],["Приоритет / верхний кран",f"К{joint.priority_crane_index} / К{joint.higher_crane_index}"]]
     for index,p in enumerate(placements,1):
-        sector=(f"{p.allowed_sector_start_deg:.1f}°…{p.allowed_sector_end_deg:.1f}°" if p.allowed_sector_start_deg is not None else "не назначен")
+        sector=_sector_text(p.allowed_sector_start_deg,p.allowed_sector_end_deg)
         rows.extend([[f"К{index}: длина стрелы",f"{p.jib_length_m:.1f} м (шаг 5 м)"],[f"К{index}: уровень стрелы",f"{(p.jib_level_m or p.required_hook_height_m):.1f} м"],[f"К{index}: разрешённый сектор",sector],[f"К{index}: точек контура",str(len(p.assigned_contour_points))]])
     table_h=_canvas_table(canvas,rows,table_x,table_y,[54*mm,63*mm],font,7)
     canvas.setFillColor(NAVY); canvas.setFont(font,9); canvas.drawString(table_x,table_y-table_h-8*mm,"ЛОГИКА БЛОКИРОВОК И ОЧЕРЁДНОСТИ")
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
     lower_index=2 if joint.higher_crane_index==1 else 1
     notes=[
-        f"К{joint.higher_crane_index} имеет приорит входа в общую зону; К{lower_index} ожидает вне общей зоны.",
+        f"К{joint.higher_crane_index} имеет приоритет входа в общую зону; К{lower_index} ожидает вне общей зоны.",
         f"Стрела нижнего К{lower_index} укорочена до расчётной монтажной длины с шагом 5 м.",
         "В общей зоне одновременно допускается только один перемещаемый груз.",
         "Координатная защита блокирует запрещённые секторы и сближение менее 5 м.",
@@ -509,7 +597,7 @@ def _draw_joint_phase_panel(canvas, project: ProjectInput, scenario: ScenarioRes
         tower_edge=transform((p.x+joint.tower_protection_radius_m,p.y)); _draw_tower_protection(canvas,center,abs(tower_edge[0]-center[0]),color)
         canvas.setFillColor(color); canvas.setFont(_font(),6); canvas.drawString(center[0]+2*mm,center[1]+2*mm,f"К{index+1}")
     canvas.setFillColor(NAVY); canvas.setFont(_font(),7.5); canvas.drawString(x+3*mm,y+h-6*mm,f"ЭТАП {phase}")
-    label=[f"К{lower+1} работает; К{higher+1} ожидает",f"К{lower+1} освобождает общую зону",f"К{higher+1} работает; К{lower+1} заблокирован",f"Передача разрешения К{higher+1} → К{lower+1}"][phase-1]
+    label=[f"К{lower+1} работает; К{higher+1} ожидает",f"К{lower+1} освобождает общую зону",f"К{higher+1} работает; К{lower+1} заблокирован",f"Передача разрешения К{higher+1} -> К{lower+1}"][phase-1]
     canvas.setFillColor(colors.black); canvas.setFont(_font(),6.2); canvas.drawString(x+18*mm,y+h-6*mm,label)
 
 
@@ -577,30 +665,36 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         Spacer(1,12*mm),Paragraph("Подписи, должности, организация, шифр проекта и согласования заполняются разработчиком до выпуска документа в производство.",small),PageBreak()]
     sheets=[("Пояснительная записка","Исходные данные, технология, организация и безопасность"),("Сравнение вариантов","До трёх вариантов размещения"),("Стройгенплан","Эскиз поверх исходного PDF-плана"),("Высотная привязка","Требуемая высота крюка и отметки"),("Грузовая ведомость","Массы, габариты, оснастка и количество подъёмов"),("Схемы строповки","Типовые схемы для каждого груза"),("Опасные зоны","Границы работы и перемещения грузов"),("Разгрузка, складирование и подача","Технологическая схема материального потока"),("Подъём и монтаж элемента","Последовательность безопасной операции"),("Совместная работа кранов","Зоны и организационные ограничения"),("Требования охраны труда и промышленной безопасности","Обязательные организационные меры"),("Контрольные листы","Проверка исходных данных и готовности"),("Лист регистрации изменений","Заполняется при корректировках")]
     story += [Paragraph("ВЕДОМОСТЬ СОСТАВА ППРк",h1),_table([["№","Наименование","Содержание"]]+[[str(i),a,b] for i,(a,b) in enumerate(sheets,1)],font,[10*mm,65*mm,95*mm]),PageBreak()]
-    story += [Paragraph("1. ОБЩИЕ ДАННЫЕ И ОБЛАСТЬ ПРИМЕНЕНИЯ",h1),Paragraph(f"ППРк разработан для объекта «{project.name or 'наименование не заполнено'}» в городе {project.city or 'не указан'}. Несущая система - монолитный железобетон; перегородки - газобетонные блоки; наружная облицовка - вентилируемый фасад.",body),Paragraph("Документ определяет предварительное размещение башенных кранов, проверку охвата, грузовысотных параметров, опасных зон и организацию типовых подъёмов. Расчёт фундамента крана, монтаж и демонтаж крана, проект пристёжек, фасадные люльки и специальные подъёмы разрабатываются отдельно.",body),Paragraph("Исходные документы",h2),_table([["Документ","Статус"],["Векторный PDF-план",Path(project.source_plan_pdf).name if project.source_plan_pdf else "Не приложен"],["PDF-разрез",Path(project.source_section_pdf).name if project.source_section_pdf else "Не приложен"],["Паспорт конкретного крана","Подлежит приложению перед утверждением"],["ПОС / календарный график","Подлежит сверке"],["Геология и решение по основанию","Отдельный расчёт"]],font,[75*mm,95*mm]),Paragraph("Высотные исходные данные",h2),Paragraph(f"Отметка низа котлована: {project.pit_bottom_m:g} м. Отметка верха парапета: {project.parapet_m:g} м. Расчётная высота: {project.parapet_m-project.pit_bottom_m:g} м.",body),PageBreak()]
+    story += [Paragraph("1. ОБЩИЕ ДАННЫЕ И ОБЛАСТЬ ПРИМЕНЕНИЯ",h1),Paragraph(f"ППРк разработан для объекта «{project.name or 'наименование не заполнено'}» в городе {project.city or 'не указан'}. Несущая система - монолитный железобетон; перегородки - газобетонные блоки; наружная облицовка - вентилируемый фасад.",body),Paragraph("Документ определяет предварительное размещение башенных кранов, проверку охвата, грузовысотных параметров, опасных зон и организацию типовых подъёмов. Расчёт фундамента крана, монтаж и демонтаж крана, проект пристёжек, фасадные люльки и специальные подъёмы разрабатываются отдельно.",body),Paragraph("Исходные документы",h2),_table([["Документ","Статус"],["Векторный PDF-план",Path(project.source_plan_pdf).name if project.source_plan_pdf else "Не приложен"],["PDF-разрез",Path(project.source_section_pdf).name if project.source_section_pdf else "Не приложен"],["Паспорт конкретного крана","Подлежит приложению перед утверждением"],["ПОС / календарный график","Подлежит сверке"],["Геология и решение по основанию","Отдельный расчёт"]],font,[75*mm,95*mm]),Paragraph("Высотные исходные данные",h2),Paragraph(f"Отметка низа котлована: {project.pit_bottom_m:g} м. Отметка верха парапета: {project.parapet_m:g} м. Расчётная высота: {project.parapet_m-project.pit_bottom_m:g} м. Этажей: {project.floors}. Пристёжки: {'допускаются' if project.tie_ins_possible else 'не допускаются'}. Принятая длина парных тяг: {project.tie_length_m:g} м, угол между ними: {project.tie_angle_deg:g}°.",body),Paragraph("Схема пристёжек является предварительной компоновкой. Расчёт тяг, закладных деталей, соединений, нагрузок на башню крана и несущие конструкции здания выполняется отдельным проектом пристёжек по паспорту фактически установленного крана.",body),PageBreak()]
     story += [Paragraph("2. СРАВНЕНИЕ ВАРИАНТОВ И ПРИНЯТОЕ РЕШЕНИЕ",h1)]
     rows=[["№","Статус","Краны","Модели","Срок, кал. дн.","Стоимость, руб.","Условия / ограничения"]]
     for index,s in enumerate(scenarios,1): rows.append([str(index),s.status,str(len(s.placements)),", ".join(p.model for p in s.placements) or "-",f"{s.calendar_days:.2f}" if s.calendar_days is not None else "-",f"{s.estimated_cost:,.0f}" if s.estimated_cost is not None else "не рассчитана","; ".join(s.warnings+s.reasons) or "Нет"])
     story += [_table(rows,font,[8*mm,20*mm,11*mm,29*mm,19*mm,23*mm,60*mm],6.6),Spacer(1,4*mm),Paragraph(f"Режим: {project.hours_per_day:g} ч/сут; коэффициент использования: {project.utilization:g}; приоритет - {'стоимость/минимум кранов' if project.priority=='cost' else 'скорость'}. Стоимость {'рассчитана по введённой суточной ставке' if project.commercial_offer_present else 'не рассчитывается: коммерческое предложение не введено'}.",body)]
+    balance_rows=[["Вар.","Активных подъёмов","Учтено","Загрузка кранов, ч"]]
+    for index,s in enumerate(scenarios,1): balance_rows.append([str(index),str(s.total_active_lifts),str(s.accounted_lifts),", ".join(f"К{i+1}: {hours:.1f}" for i,hours in enumerate(s.crane_work_hours)) or "-"])
+    story += [Spacer(1,3*mm),Paragraph("Баланс подъёмов",h2),_table(balance_rows,font,[15*mm,42*mm,30*mm,80*mm],7)]
     for i,s in enumerate(scenarios,1):
         story.append(Paragraph(f"Вариант {i}",h2))
         for j,p in enumerate(s.placements,1):
-            sector=(f"; разрешённый сектор {p.allowed_sector_start_deg:.1f}°…{p.allowed_sector_end_deg:.1f}°" if p.allowed_sector_start_deg is not None else "")
+            sector=(f"; разрешённый сектор {_sector_text(p.allowed_sector_start_deg,p.allowed_sector_end_deg)}" if p.allowed_sector_start_deg is not None else "")
             story.append(Paragraph(f"К{j} {p.model}: X={p.x:.1f} м, Y={p.y:.1f} м; рабочий вылет {p.max_radius_m:.1f} м; длина стрелы {(p.jib_length_m or p.max_radius_m):.1f} м; требуемая высота крюка {p.required_hook_height_m:.1f} м; предварительный уровень стрелы {(p.jib_level_m or p.required_hook_height_m):.1f} м{sector}.",body))
         if s.joint_plan:
             jp=s.joint_plan
             story.append(Paragraph(f"Совместная работа: расстояние между осями {jp.axis_distance_m:.1f} м; площадь пересечения рабочих окружностей {jp.overlap_area_m2:.1f} м²; рабочий горизонтальный разрыв не менее {jp.working_horizontal_clearance_m:.1f} м; защитный габарит каждой башни {jp.tower_protection_radius_m:.1f} м от оси (для пары {jp.combined_tower_envelope_m:.1f} м); разведение осей стрел {jp.vertical_separation_m:.1f} м, включая конструктивную высоту стрелы {jp.jib_structural_height_m:.1f} м и чистый зазор 1.0 м; приоритет К{jp.priority_crane_index}.",body))
+        if s.selection_audit:
+            story.append(Paragraph("Журнал подбора моделей",h2))
+            for line in s.selection_audit: story.append(Paragraph("• "+line,small))
     story.append(Paragraph("Алгоритм выбора положения крана",h2))
     algorithm_steps=[
         "Граница площадки покрывается регулярной сеткой с шагом 2 м. Каждая узловая точка рассматривается как возможная ось вращения крана.",
         "Исключаются точки вне площадки, внутри здания, в запретных зонах и за пределами введённого диапазона расстояний от здания.",
         "Контур здания дискретизируется контрольными точками с шагом не более 5 м. Вариант с одним краном допускается только при покрытии всех точек подачи грузов и всего контура здания.",
-        "Для каждой точки подачи проверяется назначенный пользователем груз: вылет, паспортная грузоподъёмность Q(R), требуемая высота крюка Hкр = Hточки + 2,3 + Hгруза + 1,5 и опасная зона.",
+        "Для каждой точки подачи проверяется назначенный пользователем груз: вылет, паспортная грузоподъёмность Q(R), требуемая высота крюка Hкр = Hточки + 2,3 + Hгруза + 1,5 и опасная зона. Активные грузы без отдельной точки консервативно проверяются на всех нанесённых точках подачи и полностью учитываются в балансе подъёмов.",
         "Если один кран не покрывает весь контур, перебираются пары допустимых позиций. Пара принимается, когда объединение зон двух кранов покрывает весь контур и все точки подачи, а расстояние между осями не менее 5 м.",
         "Для принятой пары точки контура и подачи распределяются между кранами по минимальному вылету. По азимутам назначенных точек определяется минимальный разрешённый сектор поворота с технологическим запасом 10°.",
         "Для каждого крана подбирается минимальная монтажная длина стрелы с шагом 5 м, покрывающая его точки, контур и логистические зоны. Общая противоколлизионная зона строится по этим фактическим длинам.",
         "Нижним назначается кран, стрела которого заканчивается до защитного коридора соседней башни: расстояние между осями минус 5 м рабочего зазора и 2 м габарита башни. Верхний кран назначается приоритетным; оси стрел разводятся на 3 м.",
-        "Рабочий цикл разделён на четыре стадии по образцу загруженного многокранового ППРк: работа К1, освобождение общей зоны, приоритетная работа К2 и передача разрешения обратно К1.",
+        "Рабочий цикл разделён на четыре стадии: работа нижнего крана, освобождение общей зоны, работа приоритетного верхнего крана и передача разрешения обратно нижнему.",
         "Допустимые варианты ранжируются по числу кранов, календарной продолжительности, рабочему вылету и приоритету модели. При приоритете цены штраф за второй кран существенно выше; при приоритете скорости допускается преимущество параллельной работы.",
     ]
     for step_index,item in enumerate(algorithm_steps,1): story.append(Paragraph(f"{step_index}. {item}",small))
@@ -609,18 +703,55 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
     crane_rows=[["Вар.","Кран","Модель","X, м","Y, м","R, м","L стрелы, м","H крюка, м","H стрелы, м","Сектор"]]
     for i,s in enumerate(scenarios,1):
         for j,p in enumerate(s.placements,1):
-            sector=(f"{p.allowed_sector_start_deg:.0f}…{p.allowed_sector_end_deg:.0f}°" if p.allowed_sector_start_deg is not None else "—")
+            sector=_sector_text(p.allowed_sector_start_deg,p.allowed_sector_end_deg,0) if p.allowed_sector_start_deg is not None else "—"
             crane_rows.append([str(i),f"К{j}",p.model,f"{p.x:.1f}",f"{p.y:.1f}",f"{p.max_radius_m:.1f}",f"{p.jib_length_m:.1f}",f"{p.required_hook_height_m:.1f}",f"{(p.jib_level_m or p.required_hook_height_m):.1f}",sector])
     story += [_table(crane_rows,font,[8*mm,9*mm,27*mm,13*mm,13*mm,13*mm,18*mm,20*mm,25*mm,25*mm],7),Spacer(1,4*mm),Paragraph("Требуемая высота крюка определяется по отметке точки подачи груза на здание, высоте груза, высоте строповки и безопасному зазору. Окончательная башенная комбинация, балласт, анкеровка и уровни пристёжек принимаются только по паспорту и руководству изготовителя конкретного крана.",body),Paragraph("Высотная схема на загруженном разрезе проверяется ответственным специалистом. Автоматическая численная привязка не заменяет проект пристёжек и расчёт башенной системы.",body),PageBreak()]
     story += [Paragraph("4. ГРУЗОВАЯ ВЕДОМОСТЬ И ТИПОВЫЕ ПОДЪЁМЫ",h1)]
     load_rows=[["№","Груз","Груз, кг","Оснастка, кг","Итого, кг","Габарит Д×Ш×В, м","Подъёмов"]]
-    for i,load in enumerate(project.loads,1): load_rows.append([str(i),load.name,f"{load.load_kg:g}",f"{load.rigging_kg:g}",f"{load.total_kg:g}",f"{load.length_m:g}×{load.width_m:g}×{load.height_m:g}",str(load.lifts)])
+    active_loads=[load for load in project.loads if load.active]
+    for i,load in enumerate(active_loads,1): load_rows.append([str(i),load.name,f"{load.load_kg:g}",f"{load.rigging_kg:g}",f"{load.total_kg:g}",f"{load.length_m:g}×{load.width_m:g}×{load.height_m:g}",str(load.lifts)])
     story += [_table(load_rows,font,[8*mm,45*mm,23*mm,23*mm,23*mm,34*mm,18*mm],7.5),Spacer(1,3*mm),Paragraph("Перед производством работ массы и габариты сверяются с паспортами, накладными и фактической оснасткой. Для груза, отсутствующего в ведомости, разрабатывается и утверждается отдельная схема строповки; подъём неизвестного по массе груза запрещается.",body),PageBreak()]
     joint_details=[]
     for i,s in enumerate(scenarios,1):
         if s.joint_plan:
             jp=s.joint_plan; joint_details.append(f"Для варианта {i}: оси {jp.axis_distance_m:.1f} м; общая зона {jp.overlap_area_m2:.1f} м²; К{jp.priority_crane_index} имеет приоритет; одновременно в общей зоне допускается один груз.")
-    sections=[("5. ПОДГОТОВИТЕЛЬНЫЕ МЕРОПРИЯТИЯ",["Оформить разрешительную документацию и назначить ответственных специалистов.","Проверить основание, пути, заземление, ограждения, освещение, связь и знаки безопасности.","Сверить фактические препятствия, ЛЭП, действующие кабели, деревья, охранные зоны, проезды и соседние здания с планом; до начала работ выполнить предусмотренный проектом вынос или защиту коммуникаций.","Обеспечить монтажную площадку и подъезд; монтаж и демонтаж выполнять по отдельному проекту."]),("6. ОРГАНИЗАЦИЯ РАЗГРУЗКИ, СКЛАДИРОВАНИЯ И ПОДАЧИ",["Автотранспорт принимается в выделенной зоне разгрузки по команде ответственного лица; работа крана над кабиной запрещается.","После строповки люди покидают кузов и опасную зону; выполняется контрольный подъём на 200-300 мм.","Материал передаётся на обозначенную площадку складирования, затем - к точке подачи груза на здание.","Арматура, опалубка и иные материалы складируются устойчиво по типу, с прокладками и проходами; высота штабеля подтверждается технологической картой.","Проходы, проезды, пожарные подъезды и доступ к инженерным сетям не загромождаются."]),("7. ОПАСНЫЕ ЗОНЫ И ОГРАНИЧЕНИЯ",["Опасная зона определяется от крайнего положения груза с учётом его максимального габарита и нормативного расстояния возможного отлёта.","Груз не должен проноситься за границей строительной площадки. Выход расчётной зоны требует отдельного решения и повторной проверки.","При допустимости защитных ограждений на монтажном горизонте их конструкция оформляется отдельным техническим решением.","Ограничители поворота и вылета настраиваются по утверждённому стройгенплану и проверяются перед работой.","Места стоянки автотранспорта и складирования назначаются за пределами путей движения противовеса и контролируемой зоны, если паспортом или ППРк не установлено иное."]),("8. СОВМЕСТНАЯ РАБОТА КРАНОВ",["При применении двух кранов назначается единый порядок взаимодействия и приоритет операций.","В рабочем режиме выдерживается горизонтальный разрыв не менее 5 м между кранами, стрелами, перемещаемыми грузами и конструкциями. Для графического защитного габарита принято по 2 м от оси каждой башни, суммарно 2+2=4 м.","Оси стрел разводятся не менее чем на 3 м: конструктивная высота стрелы 2 м плюс чистый вертикальный зазор 1 м.","На стоянке принимаются разрывы не менее 2 м по горизонтали и 1 м по вертикали.","Координатная защита блокирует запрещённые секторы и одновременный вход двух грузов в общую зону; машинисты используют единый радиоканал.","График содержит четыре стадии: работа К1, освобождение общей зоны, работа К2 и передача разрешения обратно К1."]+joint_details),("9. ОХРАНА ТРУДА И ПРОМЫШЛЕННАЯ БЕЗОПАСНОСТЬ",["К работе допускается аттестованный и проинструктированный персонал.","Применяются только исправные и освидетельствованные грузозахватные приспособления с маркировкой.","Запрещаются подъём людей, подтаскивание груза, освобождение защемлённых стропов краном, нахождение людей под грузом и работа при неисправных приборах безопасности.","Работа прекращается при ветре выше паспортного значения, грозе, тумане, снегопаде или недостаточной видимости.","Должны быть определены сигналы, радиоканал, аварийная остановка и порядок действий при штормовом предупреждении."])]
+    sections=[
+        ("5. ПОДГОТОВИТЕЛЬНЫЕ МЕРОПРИЯТИЯ",[
+            "Оформить разрешительную документацию и назначить ответственных специалистов.",
+            "Проверить основание, пути, заземление, ограждения, освещение, связь и знаки безопасности.",
+            "Сверить фактические препятствия, ЛЭП, действующие кабели, деревья, охранные зоны, проезды и соседние здания с планом; до начала работ выполнить предусмотренный проектом вынос или защиту коммуникаций.",
+            "Обеспечить монтажную площадку и подъезд; монтаж и демонтаж выполнять по отдельному проекту.",
+        ]),
+        ("6. ОРГАНИЗАЦИЯ РАЗГРУЗКИ, СКЛАДИРОВАНИЯ И ПОДАЧИ",[
+            "Автотранспорт принимается в выделенной зоне разгрузки по команде ответственного лица; работа крана над кабиной запрещается.",
+            "После строповки люди покидают кузов и опасную зону; выполняется контрольный подъём на 200-300 мм.",
+            "Материал передаётся на обозначенную площадку складирования, затем - к точке подачи груза на здание.",
+            "Арматура, опалубка и иные материалы складируются устойчиво по типу, с прокладками и проходами; высота штабеля подтверждается технологической картой.",
+            "Проходы, проезды, пожарные подъезды и доступ к инженерным сетям не загромождаются.",
+        ]),
+        ("7. ОПАСНЫЕ ЗОНЫ И ОГРАНИЧЕНИЯ",[
+            "Опасная зона определяется от крайнего положения груза с учётом его максимального габарита и нормативного расстояния возможного отлёта.",
+            "Груз не должен проноситься за границей строительной площадки. Выход расчётной зоны требует отдельного решения и повторной проверки.",
+            "При допустимости защитных ограждений на монтажном горизонте их конструкция оформляется отдельным техническим решением.",
+            "Ограничители поворота и вылета настраиваются по утверждённому стройгенплану и проверяются перед работой.",
+            "Места стоянки автотранспорта и складирования назначаются за пределами путей движения противовеса и контролируемой зоны, если паспортом или ППРк не установлено иное.",
+        ]),
+        ("8. СОВМЕСТНАЯ РАБОТА КРАНОВ",[
+            "При применении двух кранов назначается единый порядок взаимодействия и приоритет операций.",
+            "В рабочем режиме выдерживается горизонтальный разрыв не менее 5 м между кранами, стрелами, перемещаемыми грузами и конструкциями. Для графического защитного габарита принято по 2 м от оси каждой башни, суммарно 2+2=4 м.",
+            "Оси стрел разводятся не менее чем на 3 м: конструктивная высота стрелы 2 м плюс чистый вертикальный зазор 1 м.",
+            "На стоянке принимаются разрывы не менее 2 м по горизонтали и 1 м по вертикали.",
+            "Координатная защита блокирует запрещённые секторы и одновременный вход двух грузов в общую зону; машинисты используют единый радиоканал.",
+            "График содержит четыре стадии: работа нижнего крана, освобождение общей зоны, работа приоритетного верхнего крана и передача разрешения обратно нижнему.",
+        ]+joint_details),
+        ("9. ОХРАНА ТРУДА И ПРОМЫШЛЕННАЯ БЕЗОПАСНОСТЬ",[
+            "К работе допускается аттестованный и проинструктированный персонал.",
+            "Применяются только исправные и освидетельствованные грузозахватные приспособления с маркировкой.",
+            "Запрещаются подъём людей, подтаскивание груза, освобождение защемлённых стропов краном, нахождение людей под грузом и работа при неисправных приборах безопасности.",
+            "Работа прекращается при ветре выше паспортного значения, грозе, тумане, снегопаде или недостаточной видимости.",
+            "Должны быть определены сигналы, радиоканал, аварийная остановка и порядок действий при штормовом предупреждении.",
+        ]),
+    ]
     for heading,bullets in sections:
         story.append(Paragraph(heading,h1))
         for item in bullets: story.append(Paragraph("• "+item,body))
@@ -639,20 +770,21 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         base=PdfReader(str(path)); writer=PdfWriter()
         for page in base.pages: writer.add_page(page)
         for index,scenario in enumerate(scenarios,1):
-            plan_source=Path(project.source_plan_pdf) if project.source_plan_pdf else None; plan_vector=bool(plan_source and plan_source.exists() and project.plan_m_per_pixel>0)
+            plan_source=Path(project.source_plan_pdf) if project.source_plan_pdf else None; plan_vector=bool(plan_source and plan_source.exists() and project.plan_m_per_pixel>0 and tuple(project.plan_crop_box)==(0.0,0.0,1.0,1.0) and project.plan_background_intensity>=1.0)
             packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A4)); _plan_page(canvas,project,scenario,index,draw_source=not plan_vector); canvas.save(); packet.seek(0); plan_page=PdfReader(packet).pages[0]
             if plan_vector:
-                pw,ph=landscape(A4); left,bottom,shown_w,shown_h,_=_pdf_layout(plan_source,project.plan_render_scale,22*mm,48*mm,pw-29*mm,ph-68*mm)
+                pw,ph=landscape(A4); left,bottom,shown_w,shown_h,_=_pdf_layout(plan_source,project.plan_render_scale,22*mm,48*mm,pw-29*mm,ph-68*mm,project.plan_crop_box)
                 plan_page=_merge_vector_background(plan_page,plan_source,left,bottom,shown_w,shown_h)
             writer.add_page(plan_page)
-            section_source=Path(project.source_section_pdf) if project.source_section_pdf else None; section_vector=bool(section_source and section_source.exists() and project.section_m_per_pixel>0)
-            packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A4)); _section_page(canvas,project,scenario,index,draw_source=not section_vector); canvas.save(); packet.seek(0); section_page=PdfReader(packet).pages[0]
+            section_source=Path(project.source_section_pdf) if project.source_section_pdf else None; section_vector=bool(section_source and section_source.exists() and project.section_m_per_pixel>0 and tuple(project.section_crop_box)==(0.0,0.0,1.0,1.0) and project.section_background_intensity>=1.0)
+            packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A3)); _section_page(canvas,project,scenario,index,draw_source=not section_vector); canvas.save(); packet.seek(0); section_page=PdfReader(packet).pages[0]
             if section_vector:
-                pw,ph=landscape(A4); left,bottom,shown_w,shown_h,_=_pdf_layout(section_source,project.section_render_scale,22*mm,48*mm,pw-29*mm,ph-68*mm)
+                pw,ph=landscape(A3); left,bottom,shown_w,shown_h,_=_pdf_layout(section_source,project.section_render_scale,22*mm,48*mm,pw-29*mm,ph-68*mm,project.section_crop_box)
                 section_page=_merge_vector_background(section_page,section_source,left,bottom,shown_w,shown_h)
             writer.add_page(section_page)
-        for page_index,start in enumerate(range(0,len(project.loads),6),1):
-            packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A3)); _slinging_page(canvas,project,project.loads[start:start+6],page_index,len(writer.pages)+1); canvas.save(); packet.seek(0); writer.add_page(PdfReader(packet).pages[0])
+        active_loads=[load for load in project.loads if load.active]
+        for page_index,start in enumerate(range(0,len(active_loads),6),1):
+            packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A3)); _slinging_page(canvas,project,active_loads[start:start+6],page_index,len(writer.pages)+1); canvas.save(); packet.seek(0); writer.add_page(PdfReader(packet).pages[0])
         packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A4)); _logistics_page(canvas,project,len(writer.pages)+1); canvas.save(); packet.seek(0); writer.add_page(PdfReader(packet).pages[0])
         packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A4)); _installation_page(canvas,project,len(writer.pages)+1); canvas.save(); packet.seek(0); writer.add_page(PdfReader(packet).pages[0])
         joint_scenarios=[(index,s) for index,s in enumerate(scenarios,1) if s.joint_plan]

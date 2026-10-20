@@ -33,7 +33,7 @@ def save_project(folder: str | Path, project: ProjectInput, scenarios: list[dict
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     payload = project.to_dict()
-    payload["schema_version"] = 1
+    payload["schema_version"] = 2
     payload["saved_at"] = datetime.now().isoformat(timespec="seconds")
     payload["scenarios"] = scenarios or []
     target = folder / "project.json"
@@ -64,7 +64,7 @@ def load_project(path: str | Path) -> ProjectInput:
     if source.stat().st_size > 20 * 1024 * 1024:
         raise ValueError("project.json превышает допустимый размер 20 МБ")
     data = json.loads(source.read_text(encoding="utf-8"))
-    if data.get("schema_version") not in (None, 1):
+    if data.get("schema_version") not in (None, 1, 2):
         raise ValueError(f"Неподдерживаемая версия проекта: {data.get('schema_version')}")
     for key in ("site", "loads", "work_points"):
         if key not in data:
@@ -83,4 +83,10 @@ def load_project(path: str | Path) -> ProjectInput:
     fields["site"] = site
     fields["loads"] = [Load(**item) for item in data["loads"]]
     fields["work_points"] = [WorkPoint(**item) for item in data["work_points"]]
+    fields["schema_version"] = 2
+    for key in ("plan_crop_box", "section_crop_box"):
+        if key in fields:
+            fields[key] = tuple(fields[key])
+    if "section_building_contour" in fields:
+        fields["section_building_contour"] = [tuple(point) for point in fields["section_building_contour"]]
     return ProjectInput(**fields)

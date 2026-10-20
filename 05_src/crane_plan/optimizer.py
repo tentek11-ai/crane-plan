@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from itertools import combinations
-from math import acos, asin, atan2, ceil, cos, degrees, pi, sin, sqrt
+from math import acos, asin, atan2, ceil, cos, degrees, pi, radians, sin, sqrt
 
 from .catalog import allowed_capacity_kg
 from .geometry import (
@@ -13,6 +13,7 @@ from .geometry import (
 )
 from .models import CraneConfiguration, JointCranePlan, Placement, Point, ProjectInput, ScenarioResult
 from .normative import NormativeInputError, danger_zone_offset_from_outer_edge, required_hook_height
+from .tieins import calculate_tie_in_plan
 
 
 JIB_STRUCTURAL_HEIGHT_M = 2.0
@@ -28,10 +29,13 @@ def _valid_base(point: Point, project: ProjectInput) -> bool:
         return False
     if point_in_polygon(point, site.building):
         return False
-    if any(point_in_polygon(point, zone) for zone in site.restricted_zones):
+    # Проверяем не только ось, но и принятый защитный габарит башни.
+    if distance_to_polygon(point, site.boundary) + 1e-6 < TOWER_PROTECTION_RADIUS_M:
+        return False
+    if any(point_in_polygon(point, zone) or distance_to_polygon(point, zone) < TOWER_PROTECTION_RADIUS_M - 1e-6 for zone in site.restricted_zones):
         return False
     d = distance_to_polygon(point, site.building)
-    return site.min_crane_to_building_m <= d <= site.max_crane_to_building_m
+    return max(site.min_crane_to_building_m, TOWER_PROTECTION_RADIUS_M) <= d <= site.max_crane_to_building_m
 
 
 def _ray_is_clear(origin: Point, target: Point, project: ProjectInput) -> bool:
@@ -57,6 +61,19 @@ def _assigned_load(project: ProjectInput, wp_index: int):
     return project.loads[wp.load_index]
 
 
+def _unassigned_active_load_indices(project: ProjectInput) -> list[int]:
+    assigned={wp.load_index for wp in project.work_points if 0<=wp.load_index<len(project.loads)}
+    return [index for index,load in enumerate(project.loads) if load.active and index not in assigned]
+
+
+def _loads_for_work_point(project: ProjectInput, wp_index: int):
+    """Назначенный груз и консервативно все активные грузы без своей точки."""
+    assigned=_assigned_load(project,wp_index)
+    loads=[] if assigned is None else [assigned]
+    loads.extend(project.loads[index] for index in _unassigned_active_load_indices(project))
+    return loads
+
+
 def _coverage(point: Point, config: CraneConfiguration, project: ProjectInput) -> tuple[list[int], float, float, list[str]]:
     covered: list[int] = []
     max_radius = 0.0
@@ -69,17 +86,17 @@ def _coverage(point: Point, config: CraneConfiguration, project: ProjectInput) -
         point_hook_height = 0.0
         point_ok = True
         point_danger_warning = False
-        load = _assigned_load(project, index)
-        if load is None or not _ray_is_clear(point, wp.point, project):
+        loads = _loads_for_work_point(project, index)
+        if not loads or not _ray_is_clear(point, wp.point, project):
             continue
-        for load in (load,):
+        for load in loads:
             hook_height = required_hook_height(wp.level_m, load.height_m, 1.5, True)
             if allowed_capacity_kg(config, radius) + 1e-6 < load.total_kg:
                 point_ok = False
                 break
-            if hook_height > config.max_free_standing_hook_height_m:
+            if hook_height > config.max_free_standing_hook_height_m and not project.tie_ins_possible:
                 point_ok = False
-                warnings.append(f"{wp.name}: для груза «{load.name}» требуется пристёжка или иная высотная конфигурация")
+                warnings.append(f"{wp.name}: требуется пристёжка, но её применение не разрешено")
                 break
             try:
                 danger = danger_zone_offset_from_outer_edge(wp.level_m, load.largest_dimension_m)
@@ -97,8 +114,7 @@ def _coverage(point: Point, config: CraneConfiguration, project: ProjectInput) -
         if point_danger_warning:
             warnings.append(f"{wp.name}: опасная зона выходит за площадку; требуется проект защитного ограждения")
         if point_hook_height > config.max_free_standing_hook_height_m:
-            warnings.append(f"{wp.name}: требуется пристёжка или иная высотная конфигурация")
-            continue
+            warnings.append(f"{wp.name}: высота обеспечивается пристёжками и пятиметровыми секциями башни")
         covered.append(index)
         max_radius = max(max_radius, radius)
         max_height = max(max_height, point_hook_height)
@@ -123,7 +139,7 @@ def _logistics_coverage(point: Point, config: CraneConfiguration, project: Proje
         if radius > config.jib_length_m or not _ray_is_clear(point, target, project):
             continue
         zone_ok=True; zone_warnings=[]
-        for load in project.loads:
+        for load in (item for item in project.loads if item.active):
             if allowed_capacity_kg(config, radius) + 1e-6 < load.total_kg:
                 zone_ok=False; break
             try:
@@ -174,6 +190,30 @@ def _required_jib_length(origin: Point, targets: list[Point], config: CraneConfi
     return _mounted_jib_length(required, config.jib_length_m)
 
 
+def _with_tie_in_plan(placement: Placement, config: CraneConfiguration, project: ProjectInput, required_height_m: float | None = None) -> tuple[Placement | None,list[str]]:
+    required=max(required_height_m or 0.0,placement.required_hook_height_m)
+    if required <= 0:
+        return replace(placement,max_free_standing_height_m=config.max_free_standing_hook_height_m,accepted_crane_height_m=config.max_free_standing_hook_height_m),[]
+    plan=calculate_tie_in_plan(
+        required,config.max_free_standing_hook_height_m,project.parapet_m-project.pit_bottom_m,project.floors,
+        project.tie_length_m,project.tie_angle_deg,distance_to_polygon((placement.x,placement.y),project.site.building),
+        project.section_building_contour,project.tie_ins_possible,
+    )
+    if plan.reasons:
+        return None,plan.reasons
+    enriched=replace(
+        placement,max_free_standing_height_m=config.max_free_standing_hook_height_m,
+        accepted_crane_height_m=plan.accepted_height_m,tie_in_levels_m=[stage.level_m for stage in plan.stages],
+        tie_in_stage_sections=[stage.sections_this_stage for stage in plan.stages],total_additional_sections=plan.total_sections,
+        required_tie_length_m=plan.required_tie_length_m,tie_geometry_ok=plan.geometry_ok,
+        tie_nearest_floors=[stage.nearest_floor for stage in plan.stages],
+    )
+    warnings=[]
+    if plan.stages:
+        warnings.append(f"{placement.model}: {len(plan.stages)} пристёжк., {plan.total_sections} доп. секц. по 5 м; принятая высота {plan.accepted_height_m:.1f} м")
+    return enriched,warnings
+
+
 def _candidate_placements(project: ProjectInput, configs: list[CraneConfiguration], step_m: float) -> list[tuple[Placement, list[str], set[int], set[int]]]:
     result: list[tuple[Placement, list[str], set[int], set[int]]] = []
     contour = _sample_building_contour(project.site.building)
@@ -188,7 +228,10 @@ def _candidate_placements(project: ProjectInput, configs: list[CraneConfiguratio
             if covered or contour_covered or logistics_covered:
                 if contour_covered:
                     max_radius = max(max_radius, max(distance(point, contour[index]) for index in contour_covered))
-                result.append((Placement(config.id, config.model, point[0], point[1], covered, max_radius, max_height, config.jib_length_m), warnings, contour_covered, logistics_covered))
+                placement=Placement(config.id, config.model, point[0], point[1], covered, max_radius, max_height, config.jib_length_m)
+                placement,tie_warnings=_with_tie_in_plan(placement,config,project)
+                if placement is not None:
+                    result.append((placement, warnings+tie_warnings, contour_covered, logistics_covered))
     return result
 
 
@@ -231,6 +274,29 @@ def _minimal_covering_sector(origin: Point, targets: list[Point], padding_deg: f
         return 0.0,360.0
     padded_start=(start-padding_deg)%360.0
     return padded_start,padded_start+span+2*padding_deg
+
+
+def _radial_work_envelope(placement: Placement, project: ProjectInput, angular_step_deg: float = 5.0) -> list[tuple[float,float]]:
+    """Допустимый вылет крюка зависит от направления, а не только от сектора."""
+    active=[load for load in project.loads if load.active]
+    max_level=max((wp.level_m for wp in project.work_points),default=max(0.0,project.parapet_m-project.pit_bottom_m))
+    clearance=0.0
+    if active and not project.protective_screen_possible:
+        for load in active:
+            try: clearance=max(clearance,danger_zone_offset_from_outer_edge(max_level,load.largest_dimension_m))
+            except NormativeInputError: pass
+    limit=placement.jib_length_m or placement.max_radius_m; result=[]; angle=0.0
+    while angle<360.0-1e-9:
+        direction=(cos(radians(angle)),sin(radians(angle))); accepted=0.0; radius=0.0
+        while radius<=limit+1e-9:
+            point=(placement.x+direction[0]*radius,placement.y+direction[1]*radius)
+            if not point_in_polygon(point,project.site.boundary) or distance_to_polygon(point,project.site.boundary)+1e-6<clearance:
+                break
+            if any(point_in_polygon(point,zone) for zone in project.site.restricted_zones):
+                break
+            accepted=radius; radius+=0.5
+        result.append((angle,min(limit,accepted))); angle+=angular_step_deg
+    return result
 
 
 def _circle_overlap(c1: Point, r1: float, c2: Point, r2: float, segments: int = 36) -> tuple[float,list[Point]]:
@@ -300,19 +366,26 @@ def _prepare_joint_plan(a: Placement, b: Placement, ca: set[int], cb: set[int], 
         else:
             tower_exclusions.append((None,None))
     sectors=[_minimal_covering_sector(centers[index],assigned_targets[index]) for index in range(2)]
-    base_level=max(a.required_hook_height_m,b.required_hook_height_m)+3.0
+    active_loads=[load for load in project.loads if load.active]
+    representative_height=max((load.height_m for load in active_loads),default=1.0)
+    building_service_height=required_hook_height(project.parapet_m-project.pit_bottom_m,representative_height,1.5,True)
+    required_heights=[]
+    for crane,original in enumerate((a,b)):
+        task_height=max((required_hook_height(project.work_points[index].level_m,load.height_m,1.5,True) for index in work_assignments[crane] for load in _loads_for_work_point(project,index)),default=0.0)
+        if contour_assignments[crane] or logistics_assignments[crane]:
+            task_height=max(task_height,building_service_height)
+        required_heights.append(max(task_height,original.required_hook_height_m if work_assignments[crane] else 0.0))
+    base_level=max(required_heights)+3.0
     vertical_centerline_separation=JIB_STRUCTURAL_HEIGHT_M+VERTICAL_FREE_CLEARANCE_M
     levels=[0.0,0.0]
     levels[lower_index]=base_level
     levels[higher_index]=base_level+vertical_centerline_separation
-    # Свободностоящая конфигурация ограничена каталогом. Для перехода от
-    # паспортной высоты крюка к оси стрелы консервативно допускаются только
-    # конструктивные 2 м; произвольные башенные комбинации не синтезируются.
-    for index, placement in enumerate((a, b)):
-        if levels[index] > configs[placement.crane_id].max_free_standing_hook_height_m + JIB_STRUCTURAL_HEIGHT_M + 1e-6:
-            return None
-    pa=replace(a,assigned_work_points=work_assignments[0],assigned_contour_points=contour_assignments[0],assigned_logistics_zones=logistics_assignments[0],max_radius_m=required_radii[0],jib_length_m=mounted_jibs[0],jib_level_m=levels[0],allowed_sector_start_deg=sectors[0][0],allowed_sector_end_deg=sectors[0][1],tower_exclusion_start_deg=tower_exclusions[0][0],tower_exclusion_end_deg=tower_exclusions[0][1])
-    pb=replace(b,assigned_work_points=work_assignments[1],assigned_contour_points=contour_assignments[1],assigned_logistics_zones=logistics_assignments[1],max_radius_m=required_radii[1],jib_length_m=mounted_jibs[1],jib_level_m=levels[1],allowed_sector_start_deg=sectors[1][0],allowed_sector_end_deg=sectors[1][1],tower_exclusion_start_deg=tower_exclusions[1][0],tower_exclusion_end_deg=tower_exclusions[1][1])
+    pa=replace(a,assigned_work_points=work_assignments[0],assigned_contour_points=contour_assignments[0],assigned_logistics_zones=logistics_assignments[0],max_radius_m=required_radii[0],required_hook_height_m=required_heights[0],jib_length_m=mounted_jibs[0],jib_level_m=levels[0],allowed_sector_start_deg=sectors[0][0],allowed_sector_end_deg=sectors[0][1],tower_exclusion_start_deg=tower_exclusions[0][0],tower_exclusion_end_deg=tower_exclusions[0][1])
+    pb=replace(b,assigned_work_points=work_assignments[1],assigned_contour_points=contour_assignments[1],assigned_logistics_zones=logistics_assignments[1],max_radius_m=required_radii[1],required_hook_height_m=required_heights[1],jib_length_m=mounted_jibs[1],jib_level_m=levels[1],allowed_sector_start_deg=sectors[1][0],allowed_sector_end_deg=sectors[1][1],tower_exclusion_start_deg=tower_exclusions[1][0],tower_exclusion_end_deg=tower_exclusions[1][1])
+    pa,wa=_with_tie_in_plan(pa,configs[pa.crane_id],project,levels[0])
+    pb,wb=_with_tie_in_plan(pb,configs[pb.crane_id],project,levels[1])
+    if pa is None or pb is None:
+        return None
     overlap_area,overlap_polygon=_circle_overlap(centers[0],mounted_jibs[0],centers[1],mounted_jibs[1])
     plan=JointCranePlan(axis_distance,5.0,2.0,levels[higher_index]-levels[lower_index],higher_index+1,higher_index+1,bool(overlap_polygon),overlap_area,overlap_polygon,[
         f"К{higher_index+1} является высотным и операционным приоритетом в общей зоне.",
@@ -320,7 +393,8 @@ def _prepare_joint_plan(a: Placement, b: Placement, ca: set[int], cb: set[int], 
         "Одновременное нахождение двух грузов в общей противоколлизионной зоне запрещено.",
         "Координатная защита блокирует запретные секторы и подход стрелы к защитному габариту соседней башни.",
         "В нерабочем положении обеспечить не менее 2 м по горизонтали и 1 м по вертикали.",
-        "Предварительные отметки стрел уточняются по башенным комбинациям и паспортам выбранных кранов.",
+        "Предварительные отметки стрел, секций и пристёжек уточняются по башенным комбинациям и паспортам выбранных кранов.",
+        *wa,*wb,
     ],JIB_STRUCTURAL_HEIGHT_M,TOWER_PROTECTION_RADIUS_M,COMBINED_TOWER_ENVELOPE_M,[
         f"К{lower_index+1} работает в своём секторе; К{higher_index+1} ожидает вне общей зоны.",
         f"К{lower_index+1} выходит из общей зоны и подтверждает её освобождение по радиосвязи.",
@@ -330,15 +404,18 @@ def _prepare_joint_plan(a: Placement, b: Placement, ca: set[int], cb: set[int], 
     return pa,pb,plan
 
 
-def _duration(project: ProjectInput, placements: list[Placement]) -> float:
+def _duration_ledger(project: ProjectInput, placements: list[Placement]) -> tuple[float, int, int, list[float]]:
     if not placements:
-        return 0.0
+        return 0.0, 0, 0, []
     work_hours = [0.0 for _ in placements]
+    total_lifts=sum(load.lifts for load in project.loads if load.active)
+    accounted_lifts=0
     points_by_load = {index: [i for i, wp in enumerate(project.work_points) if wp.load_index == index] for index in range(len(project.loads))}
     for load_index, load in enumerate(project.loads):
-        points = points_by_load[load_index]
-        if not points:
+        if not load.active:
             continue
+        points = points_by_load[load_index] or list(range(len(project.work_points)))
+        accounted_lifts += load.lifts
         per_point_lifts = load.lifts / len(points)
         for point_index in points:
             owner = next((i for i, placement in enumerate(placements) if point_index in placement.assigned_work_points), 0)
@@ -347,7 +424,11 @@ def _duration(project: ProjectInput, placements: list[Placement]) -> float:
             radius = distance((placement.x, placement.y), wp.point)
             cycle_minutes = max(8.0, 6.0 + 0.18 * radius + 0.12 * max(0.0, wp.level_m))
             work_hours[owner] += per_point_lifts * cycle_minutes / 60.0
-    return max(work_hours) / (project.hours_per_day * project.utilization)
+    return max(work_hours) / (project.hours_per_day * project.utilization), total_lifts, accounted_lifts, work_hours
+
+
+def _duration(project: ProjectInput, placements: list[Placement]) -> float:
+    return _duration_ledger(project,placements)[0]
 
 
 def diagnose_no_solution(project: ProjectInput, configs: list[CraneConfiguration], step_m: float = 2.0) -> list[str]:
@@ -370,10 +451,9 @@ def diagnose_no_solution(project: ProjectInput, configs: list[CraneConfiguration
         if min_radius > max_jib:
             reasons.append(f"{name}: минимальный достижимый вылет {min_radius:.1f} м больше максимальной стрелы в каталоге {max_jib:.1f} м.")
             continue
-        assigned = _assigned_load(project, point_index - 1)
-        for load in (() if assigned is None else (assigned,)):
+        for load in _loads_for_work_point(project, point_index - 1):
             hook_height = required_hook_height(wp.level_m, load.height_m, 1.5, True)
-            if hook_height > max_hook:
+            if hook_height > max_hook and not project.tie_ins_possible:
                 reasons.append(f"{name}: для груза «{load.name}» нужна высота крюка {hook_height:.1f} м, а максимум свободностоящих конфигураций {max_hook:.1f} м. Нужна пристёжка или другая башенная конфигурация.")
                 continue
             best_capacity = 0.0
@@ -412,22 +492,32 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
         return [ScenarioResult("BLOCKED", [], ["Не заданы точки подачи грузов на здание"], [])]
     if not project.loads:
         return [ScenarioResult("BLOCKED",[],["Не задан ни один груз"],[])]
+    if not any(load.active for load in project.loads):
+        return [ScenarioResult("BLOCKED",[],["Ни один груз не включён в проект. Отметьте минимум один груз как используемый."],[])]
+    building_height=project.parapet_m-project.pit_bottom_m
+    unassigned=[project.loads[index].name for index in _unassigned_active_load_indices(project)]
+    fallback_warning=("Активные грузы без отдельной точки подачи: " + ", ".join(unassigned) +
+                      ". Для консервативной проверки они рассчитаны на всех нанесённых точках подачи.") if unassigned else ""
     for wp in project.work_points:
         if not point_in_polygon(wp.point,project.site.building):
             return [ScenarioResult("BLOCKED",[],[f"{wp.name}: точка подачи находится вне здания"],[])]
         if wp.load_index<0 or wp.load_index>=len(project.loads):
             return [ScenarioResult("BLOCKED",[],[f"{wp.name}: назначенный груз отсутствует"],[])]
+        if not project.loads[wp.load_index].active:
+            return [ScenarioResult("BLOCKED",[],[f"{wp.name}: назначен груз, исключённый из проекта. Выберите активный груз либо удалите точку подачи."],[])]
+        if wp.level_m > building_height + 0.5 and not wp.special_roof_load:
+            return [ScenarioResult("BLOCKED",[],[f"{wp.name}: отметка {wp.level_m:.1f} м выше верха парапета {building_height:.1f} м. Исправьте отметку либо явно отметьте специальный подъём на кровлю."],[])]
     unloading=[polygon_centroid(project.site.unloading_zone)] if project.site.unloading_zone else []
     storage=[polygon_centroid(zone) for zone in project.site.storage_zones]
     if unloading and storage:
-        low_danger=max(danger_zone_offset_from_outer_edge(1.0,load.largest_dimension_m) for load in project.loads)
+        low_danger=max(danger_zone_offset_from_outer_edge(1.0,load.largest_dimension_m) for load in project.loads if load.active)
         for index,target in enumerate(storage,1):
             if not any(_route_is_safe(source,target,project,low_danger) for source in unloading):
                 return [ScenarioResult("BLOCKED",[],[f"Маршрут от разгрузки к зоне складирования {index} пересекает запрет или выходит за допустимую границу"],[])]
     sources=storage or unloading
     if sources:
         for index,wp in enumerate(project.work_points):
-            load=_assigned_load(project,index); danger=danger_zone_offset_from_outer_edge(wp.level_m,load.largest_dimension_m)
+            danger=max(danger_zone_offset_from_outer_edge(wp.level_m,load.largest_dimension_m) for load in _loads_for_work_point(project,index))
             if not any(_route_is_safe(source,wp.point,project,danger) for source in sources):
                 return [ScenarioResult("BLOCKED",[],[f"{wp.name}: не найден безопасный маршрут подачи из зоны складирования/разгрузки"],[])]
     # Граница версии 1.x: в автоматическом подборе используются башенные краны
@@ -436,6 +526,7 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
     if ec_b_configs:
         configs=ec_b_configs
     candidates = _candidate_placements(project, configs, step_m)
+    candidate_models={placement.crane_id for placement,_,_,_ in candidates}
     all_points = set(range(len(project.work_points)))
     contour = _sample_building_contour(project.site.building)
     all_contour = set(range(len(contour)))
@@ -482,6 +573,21 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
     crane_penalty = 1000.0 if project.priority == "cost" else 20.0
     model_priority = {config.id: config.priority for config in configs}
     for scenario in scenarios:
+        if fallback_warning:
+            scenario.warnings.append(fallback_warning)
+            scenario.status="PASS_WITH_CONDITIONS"
+        duration,total_lifts,accounted_lifts,work_hours=_duration_ledger(project,scenario.placements)
+        scenario.calendar_days=duration
+        scenario.total_active_lifts=total_lifts
+        scenario.accounted_lifts=accounted_lifts
+        scenario.crane_work_hours=work_hours
+        scenario.placements=[replace(p,radial_limits_m=_radial_work_envelope(p,project)) for p in scenario.placements]
+        chosen={p.crane_id for p in scenario.placements}; audit=[]
+        for config in sorted(configs,key=lambda item:(item.priority,item.model)):
+            if config.id in chosen: audit.append(f"{config.model}: выбран в варианте.")
+            elif config.id not in candidate_models: audit.append(f"{config.model}: отклонён — нет допустимой позиции, одновременно удовлетворяющей вылету, Q(R), высоте и ограничениям.")
+            else: audit.append(f"{config.model}: допустимые частичные позиции есть, но итоговый вариант уступил по полноте покрытия или целевой функции.")
+        scenario.selection_audit=audit
         if project.commercial_offer_present and project.commercial_offer_daily_cost > 0:
             scenario.estimated_cost = len(scenario.placements) * (scenario.calendar_days or 0) * project.commercial_offer_daily_cost
         scenario.score = ((scenario.estimated_cost if scenario.estimated_cost is not None else len(scenario.placements) * crane_penalty) + (scenario.calendar_days or 0)

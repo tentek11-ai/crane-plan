@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pdfplumber
 import pypdfium2 as pdfium
+from PIL import Image, ImageEnhance, ImageOps
 
 
 MAX_PDF_BYTES = 200 * 1024 * 1024
@@ -34,6 +35,39 @@ class PdfInspection:
     likely_vector: bool
 
 
+@dataclass
+class PdfViewportTransform:
+    """Независимое от Tk преобразование document <-> view.
+
+    Разметка хранится в координатах документа; zoom и pan влияют
+    только на её экранное представление.
+    """
+
+    scale: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+
+    def document_to_view(self, point: tuple[float, float]) -> tuple[float, float]:
+        return point[0] * self.scale + self.offset_x, point[1] * self.scale + self.offset_y
+
+    def view_to_document(self, point: tuple[float, float]) -> tuple[float, float]:
+        if self.scale <= 0:
+            raise ValueError("Масштаб вида должен быть положительным")
+        return (point[0] - self.offset_x) / self.scale, (point[1] - self.offset_y) / self.scale
+
+    def zoom_at(self, cursor: tuple[float, float], factor: float, minimum: float = 0.1, maximum: float = 8.0) -> None:
+        if factor <= 0:
+            raise ValueError("Коэффициент масштабирования должен быть положительным")
+        document_point = self.view_to_document(cursor)
+        self.scale = max(minimum, min(maximum, self.scale * factor))
+        self.offset_x = cursor[0] - document_point[0] * self.scale
+        self.offset_y = cursor[1] - document_point[1] * self.scale
+
+    def pan_by(self, dx: float, dy: float) -> None:
+        self.offset_x += dx
+        self.offset_y += dy
+
+
 def inspect_pdf(path: str | Path) -> PdfInspection:
     path = Path(path)
     _validate_pdf_file(path)
@@ -54,7 +88,48 @@ def inspect_pdf(path: str | Path) -> PdfInspection:
     return PdfInspection(str(path), digest, pages, lines, rects, text_chars, (lines + rects) >= 10)
 
 
-def render_page(path: str | Path, page_index: int = 0, scale: float = 1.5):
+def normalize_crop_box(crop_box: tuple[float, float, float, float] | list[float] | None) -> tuple[float, float, float, float]:
+    """Validate a crop rectangle stored as fractions of the full PDF page."""
+    if crop_box is None:
+        return (0.0, 0.0, 1.0, 1.0)
+    if len(crop_box) != 4:
+        raise ValueError("Окно обрезки должно содержать четыре координаты")
+    x0, y0, x1, y1 = (max(0.0, min(1.0, float(value))) for value in crop_box)
+    x0, x1 = sorted((x0, x1)); y0, y1 = sorted((y0, y1))
+    if x1 - x0 < 0.01 or y1 - y0 < 0.01:
+        raise ValueError("Окно обрезки слишком мало; выделите более крупный фрагмент")
+    return (x0, y0, x1, y1)
+
+
+def crop_pixel_box(image_size: tuple[int, int], crop_box=None) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = normalize_crop_box(crop_box)
+    width, height = image_size
+    return (
+        max(0, min(width - 1, round(x0 * width))),
+        max(0, min(height - 1, round(y0 * height))),
+        max(1, min(width, round(x1 * width))),
+        max(1, min(height, round(y1 * height))),
+    )
+
+
+def fade_background(image: Image.Image, intensity: float = 0.35) -> Image.Image:
+    """Make a drawing quiet while retaining enough linework for orientation."""
+    intensity = float(intensity)
+    if not 0.05 <= intensity <= 1.0:
+        raise ValueError("Интенсивность подложки должна быть от 0,05 до 1,0")
+    gray = ImageOps.grayscale(image).convert("RGB")
+    gray = ImageEnhance.Contrast(gray).enhance(0.72)
+    white = Image.new("RGB", gray.size, "white")
+    return Image.blend(white, gray, intensity)
+
+
+def render_page(
+    path: str | Path,
+    page_index: int = 0,
+    scale: float = 1.5,
+    crop_box: tuple[float, float, float, float] | list[float] | None = None,
+    background_intensity: float | None = None,
+):
     path = Path(path)
     _validate_pdf_file(path)
     if scale <= 0 or scale > MAX_RENDER_SCALE:
@@ -69,7 +144,10 @@ def render_page(path: str | Path, page_index: int = 0, scale: float = 1.5):
             raise IndexError("Номер страницы вне диапазона")
         page = pdf[page_index]
         bitmap = page.render(scale=scale)
-        return bitmap.to_pil().copy()
+        image = bitmap.to_pil().copy().convert("RGB")
+        pixel_box = crop_pixel_box(image.size, crop_box)
+        image = image.crop(pixel_box)
+        return fade_background(image, background_intensity) if background_intensity is not None else image
     finally:
         if bitmap is not None:
             bitmap.close()

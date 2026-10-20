@@ -1,0 +1,12 @@
+parameter,value,unit,status,source_hash,locator,public_note
+project_code,25.12-19/00.000.ППРк,,CONFIRMED,,pprk_registry.csv:PPRK-005,Проектный шифр
+publication_address,"г. Москва, Малый Знаменский переулок",,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,"pprk_registry.csv:PPRK-005; author attestation recorded 2026-10-20",Улица и объект подтверждены; публикация полного адреса ожидает разрешения
+implementation_year,2026,year,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,author attestation recorded 2026-10-20,Реализация сообщена автором и требует документального подтверждения
+crane_count,1,count,CONFIRMED,,pprk_registry.csv:PPRK-005; sheets 01/01a/02/03/04,Один кран
+crane_model,112 EC-H8,,CONFIRMED,,pprk_registry.csv:PPRK-005; primary sheet locator pending,Расхождение с ранним резюме 132 EC-H8 устранено в пользу сводного реестра до проверки первичного листа
+jib_length,55,m,CONFIRMED,,pprk_registry.csv:PPRK-005; sheets 01/01a/02/03/04,Установленная стрела
+hook_height_from_foundation,27.0,m,DIGITIZED,,pprk_registry.csv:PPRK-005; interpretation pending,Трактовка отметки требует подтверждения
+tip_capacity,1.55,t,CONFIRMED,,pprk_registry.csv:PPRK-005; crane data sheets,Грузоподъемность при 55 м
+maximum_documented_full_mass,5.2,t,CONFIRMED,,pprk_registry.csv:PPRK-005; load schedule,Максимальная полная масса по ведомости
+critical_radius,UNKNOWN,m,UNKNOWN,,source not yet localized,Расчет блокируется до подтверждения
+coordinate_system,UNKNOWN,m,UNKNOWN,,geometry requires digitization,Координаты не восстановлены

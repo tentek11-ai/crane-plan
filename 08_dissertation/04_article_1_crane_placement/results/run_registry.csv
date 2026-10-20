@@ -1,0 +1,1 @@
+run_id,case_id,validation_status,created_at_utc,algorithm_version,catalog_version,step_m,refinement_levels,project_sha256,crane_configuration_sha256,result_file

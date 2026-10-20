@@ -1,0 +1,14 @@
+parameter,value,unit,status,source_hash,locator,public_note
+project_code,10.04-20/00.000.ППРк,,CONFIRMED,,project_summary.md and pprk_registry.csv:PPRK-007,Проектный шифр совпадает
+publication_address,"г. Москва, улица Новаторов",,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,"ППРк(1)/Лист01.pdf; author attestation recorded 2026-10-20",Улица подтверждена; публикация полного адреса ожидает разрешения
+implementation_year,2026,year,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,author attestation recorded 2026-10-20,Реализация сообщена автором и требует документального подтверждения
+source_identity,ППРк(1),,CONFIRMED,,"ППРк(1)/Лист01.pdf; pprk_registry.csv:PPRK-007",Комплект 10.04-20/00.000.ППРк по улице Новаторов
+crane_count,2,count,CONFIRMED,,"ППРк(1)/Лист01.pdf; pprk_registry.csv:PPRK-007",Два крана и три стадии совместной работы
+crane_model,"Potain MD95; Liebherr 71 EC",,CONFIRMED,,"ППРк(1)/Лист01.pdf; pprk_registry.csv:PPRK-007",Модели нанесены на стройгенплан
+jib_length_md95,35,m,CONFIRMED,,"ППРк(1)/Лист01.pdf; pprk_registry.csv:PPRK-007",Длина стрелы Potain MD95
+jib_length_71ec,45,m,CONFIRMED,,"ППРк(1)/Лист01.pdf; pprk_registry.csv:PPRK-007",Длина стрелы Liebherr 71 EC
+hook_height_md95,42.2,m,DIGITIZED,,pprk_registry.csv:PPRK-007,От фундамента; трактовка отметки требует проверки по разрезу
+hook_height_71ec,36.3,m,DIGITIZED,,pprk_registry.csv:PPRK-007,От фундамента; трактовка отметки требует проверки по разрезу
+maximum_documented_full_mass,5.2,t,CONFIRMED,,pprk_registry.csv:PPRK-007; load schedule,Максимальная полная масса по ведомости
+critical_radius,UNKNOWN,m,UNKNOWN,,source not yet localized,Расчет блокируется до подтверждения
+coordinate_system,UNKNOWN,m,UNKNOWN,,geometry requires digitization,Координаты не восстановлены

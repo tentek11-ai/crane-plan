@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "catalog_version": "3.0.0-2026-10-20",
+  "units": {
+    "radius": "m",
+    "capacity": "kg",
+    "height": "m"
+  },
+  "configurations": [
+    {
+      "id": "LIEBHERR-130-ECB-6-60-V3",
+      "manufacturer": "Liebherr",
+      "model": "130 EC-B 6",
+      "priority": 1,
+      "jib_length_m": 60.0,
+      "max_free_standing_hook_height_m": 44.4,
+      "capacity_curve": [
+        [20.0, 6000.0],
+        [22.5, 6000.0],
+        [25.0, 6000.0],
+        [27.5, 5900.0],
+        [30.0, 5200.0],
+        [32.5, 4600.0],
+        [35.0, 4100.0],
+        [37.5, 3650.0],
+        [40.0, 3300.0],
+        [42.5, 2950.0],
+        [45.0, 2650.0],
+        [47.5, 2400.0],
+        [50.0, 2150.0],
+        [52.5, 1950.0],
+        [55.0, 1750.0],
+        [57.5, 1550.0],
+        [60.0, 1350.0]
+      ],
+      "allowed_jib_lengths_m": [20.0, 22.5, 25.0, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0, 42.5, 45.0, 47.5, 50.0, 52.5, 55.0, 57.5, 60.0],
+      "allowed_tower_section_heights_m": [2.5, 4.14],
+      "source": {
+        "kind": "PASSPORT",
+        "document_id": "CRANE-CAT-001",
+        "locator": "pp. 2 (capacity chart), 4 (hook heights)",
+        "sha256": "5c3d9c1d41736a7d9a38475ddaf79930dbf9b7fa4352501d8981e9d57890c0ed",
+        "note": "Local file: library/cranes/brochures/Liebherr_130_EC-B_6_technical_data.pdf"
+      }
+    }
+  ]
+}

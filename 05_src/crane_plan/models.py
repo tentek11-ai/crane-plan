@@ -18,6 +18,8 @@ class Load:
     width_m: float
     height_m: float
     lifts: int = 1
+    active: bool = True
+    exclusion_reason: str = ""
 
     @property
     def total_kg(self) -> float:
@@ -35,6 +37,7 @@ class WorkPoint:
     level_m: float
     load_index: int
     name: str = "Точка подачи груза"
+    special_roof_load: bool = False
 
     @property
     def point(self) -> Point:
@@ -82,11 +85,22 @@ class ProjectInput:
     section_axis_dy: float = -1.0
     section_m_per_pixel: float = 0.0
     section_render_scale: float = 1.5
+    plan_crop_box: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+    section_crop_box: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0)
+    plan_background_intensity: float = 0.35
+    section_background_intensity: float = 0.35
+    floors: int = 1
+    tie_ins_possible: bool = True
+    tie_length_m: float = 12.0
+    tie_angle_deg: float = 60.0
+    section_building_contour: list[Point] = field(default_factory=list)
     organization: str = ""
     project_code: str = ""
     project_stage: str = "ППРк"
     checked_by: str = ""
     approved_by: str = ""
+    schema_version: int = 2
+    restricted_zones_confirmed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -121,6 +135,15 @@ class Placement:
     tower_exclusion_start_deg: float | None = None
     tower_exclusion_end_deg: float | None = None
     assigned_logistics_zones: list[int] = field(default_factory=list)
+    max_free_standing_height_m: float = 0.0
+    accepted_crane_height_m: float = 0.0
+    tie_in_levels_m: list[float] = field(default_factory=list)
+    tie_in_stage_sections: list[int] = field(default_factory=list)
+    total_additional_sections: int = 0
+    required_tie_length_m: float = 0.0
+    tie_geometry_ok: bool = True
+    tie_nearest_floors: list[int] = field(default_factory=list)
+    radial_limits_m: list[tuple[float, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -151,6 +174,10 @@ class ScenarioResult:
     score: float | None = None
     joint_plan: JointCranePlan | None = None
     estimated_cost: float | None = None
+    total_active_lifts: int = 0
+    accounted_lifts: int = 0
+    crane_work_hours: list[float] = field(default_factory=list)
+    selection_audit: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -65,21 +65,53 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(len(result[0].placements), 1)
         self.assertTrue(any("130 EC-B 8" in warning for warning in result[0].warnings))
 
-    def test_only_assigned_load_is_checked_at_work_point(self):
+    def test_unassigned_active_load_uses_existing_points_and_is_accounted(self):
         project = ProjectInput(
             name="Тест", city="Москва", year=2026, author="Автор", email="a@example.test",
             pit_bottom_m=0, parapet_m=20,
             site=SiteInput([(-50,-50),(50,-50),(50,50),(-50,50)], [(-5,-5),(5,-5),(5,5),(-5,5)], min_crane_to_building_m=1, max_crane_to_building_m=25),
-            loads=[Load("Лёгкий",100,10,1,1,1), Load("Сверх нормы",13000,100,1,1,1)],
+            loads=[Load("Лёгкий",100,10,1,1,1,70), Load("Без своей точки",1000,100,1,1,1,90)],
             work_points=[WorkPoint(0,0,20,0)], protective_screen_possible=True,
         )
-        catalog = load_catalog(ROOT / "02_processed_data/cranes/crane_configurations.json")
-        result = optimize(project, catalog, step_m=5)
-        self.assertIn(result[0].status, {"PASS", "PASS_WITH_CONDITIONS"})
-        project.work_points[0].load_index = 1
-        result = optimize(project, catalog, step_m=5)
-        self.assertEqual(result[0].status, "BLOCKED")
-        self.assertTrue(any("требует 13100 кг" in reason and "доступно" in reason for reason in result[0].reasons))
+        crane=CraneConfiguration("test","130 EC-B 6",1,60,6000,60,((0,6000),(60,6000)),"test")
+
+        result = optimize(project, [crane], step_m=5)[0]
+
+        self.assertIn(result.status,{"PASS","PASS_WITH_CONDITIONS"})
+        self.assertEqual(result.total_active_lifts,160)
+        self.assertEqual(result.accounted_lifts,160)
+        self.assertTrue(any("без отдельной точки" in warning for warning in result.warnings))
+
+        project.loads[1].load_kg=13000
+        blocked = optimize(project, [crane], step_m=5)[0]
+        self.assertEqual(blocked.status, "BLOCKED")
+        self.assertTrue(any("требует 13100 кг" in reason and "доступно" in reason for reason in blocked.reasons))
+
+    def test_point_above_parapet_requires_explicit_special_lift(self):
+        project=ProjectInput(
+            "Тест","Москва",2026,"","",0,45,
+            SiteInput([(-40,-40),(40,-40),(40,40),(-40,40)],[(-5,-5),(5,-5),(5,5),(-5,5)],min_crane_to_building_m=2,max_crane_to_building_m=25),
+            [Load("Груз",500,50,1,1,1,10)],[WorkPoint(0,0,62,0)],protective_screen_possible=True,
+        )
+        crane=CraneConfiguration("test","130 EC-B 6",1,60,6000,80,((0,6000),(60,1000)),"test")
+        result=optimize(project,[crane],step_m=5)[0]
+        self.assertEqual(result.status,"BLOCKED")
+        self.assertTrue(any("выше верха парапета" in reason for reason in result.reasons))
+        project.work_points[0].special_roof_load=True
+        self.assertIn(optimize(project,[crane],step_m=5)[0].status,{"PASS","PASS_WITH_CONDITIONS"})
+
+    def test_duration_ledger_accounts_all_active_lifts(self):
+        project=ProjectInput(
+            "Тест","Москва",2026,"","",0,20,
+            SiteInput([(-50,-50),(50,-50),(50,50),(-50,50)],[(-5,-5),(5,-5),(5,5),(-5,5)],min_crane_to_building_m=2,max_crane_to_building_m=25),
+            [Load("A",500,50,1,1,1,70),Load("B",600,50,1,1,1,90)],
+            [WorkPoint(-2,0,20,0),WorkPoint(2,0,20,1)],protective_screen_possible=True,
+        )
+        crane=CraneConfiguration("test","130 EC-B 6",1,60,6000,60,((0,6000),(60,1000)),"test")
+        result=optimize(project,[crane],step_m=5)[0]
+        self.assertEqual(result.total_active_lifts,160)
+        self.assertEqual(result.accounted_lifts,160)
+        self.assertGreater(result.calendar_days,.5)
 
     def test_restricted_zone_blocks_boom_direction(self):
         project = ProjectInput(
@@ -150,6 +182,36 @@ class OptimizerTests(unittest.TestCase):
         self.assertLessEqual(result[0].placements[lower].jib_length_m,result[0].joint_plan.axis_distance_m-7.0+1e-6)
         self.assertTrue(all(abs((p.jib_length_m/5)-round(p.jib_length_m/5))<1e-9 for p in result[0].placements))
         self.assertTrue(all(p.max_radius_m<=p.jib_length_m+1e-6 for p in result[0].placements))
+        self.assertTrue(all(p.required_hook_height_m>0 for p in result[0].placements))
+        self.assertTrue(all(p.radial_limits_m for p in result[0].placements))
+
+    def test_work_point_cannot_reference_inactive_load(self):
+        project=ProjectInput(
+            "Тест","Москва",2026,"","",0,20,
+            SiteInput([(-40,-40),(40,-40),(40,40),(-40,40)],[(-5,-5),(5,-5),(5,5),(-5,5)],min_crane_to_building_m=2,max_crane_to_building_m=25),
+            [Load("Исключённый",500,50,1,1,1,10,active=False)],
+            [WorkPoint(0,0,20,0)],protective_screen_possible=True,
+        )
+        crane=CraneConfiguration("test","130 EC-B 6",1,60,6000,60,((0,6000),(60,1000)),"test")
+        result=optimize(project,[crane],step_m=5)[0]
+        self.assertEqual(result.status,"BLOCKED")
+        self.assertTrue(any("Ни один груз" in reason or "исключённый" in reason for reason in result.reasons))
+
+    def test_optimizer_adds_minimum_mast_sections_and_tie(self):
+        project=ProjectInput(
+            "Высотный корпус","Москва",2026,"","",0,61,
+            SiteInput([(-30,-30),(30,-30),(30,30),(-30,30)],[(-8,-8),(8,-8),(8,8),(-8,8)],min_crane_to_building_m=4,max_crane_to_building_m=9),
+            [Load("Груз",500,50,1,1,1)],[WorkPoint(0,0,56,0)],protective_screen_possible=True,
+            floors=20,tie_ins_possible=True,tie_length_m=12,tie_angle_deg=60,
+            section_building_contour=[(0,0),(20,0),(20,61),(0,61)],
+        )
+        crane=CraneConfiguration("test","130 EC-B 6",1,35,6000,44.4,((0,6000),(35,2000)),"test")
+        result=optimize(project,[crane],step_m=3)[0]
+        self.assertEqual(result.status,"PASS_WITH_CONDITIONS")
+        placement=result.placements[0]
+        self.assertEqual(placement.tie_in_levels_m,[38.4])
+        self.assertEqual(placement.total_additional_sections,4)
+        self.assertAlmostEqual(placement.accepted_crane_height_m,64.4)
 
 
 if __name__ == "__main__":

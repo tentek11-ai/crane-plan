@@ -1,10 +1,11 @@
 @echo off
+chcp 65001 >nul
 setlocal
 set "APP_ROOT=%~dp0"
 if exist "%APP_ROOT%runtime\python.exe" goto portable
 set "BUNDLED_PY=C:\Users\Владимир\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
 if not exist "%BUNDLED_PY%" (
-  echo Не найден Python runtime. Используйте сборку portable или установите Python 3.12.
+  echo Python runtime not found. Use the portable build or install Python 3.12.
   pause
   exit /b 1
 )
@@ -14,7 +15,7 @@ goto done
 
 :portable
 for %%D in (K L M N P Q R S T U V W X Y Z) do if not exist %%D:\ goto use_drive_%%D
-echo Нет свободной буквы диска для безопасного запуска из пути с кириллицей.
+echo No free drive letter is available for the portable launcher.
 pause
 exit /b 1
 :use_drive_K
