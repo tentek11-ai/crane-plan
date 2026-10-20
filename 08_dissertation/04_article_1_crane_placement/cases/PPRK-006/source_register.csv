@@ -1,0 +1,12 @@
+parameter,value,unit,status,source_hash,locator,public_note
+project_code,29.12-19/00.000.ППРк,,CONFIRMED,,pprk_registry.csv:PPRK-006,Проектный шифр
+publication_address,"Московская область, г. Люберцы",,USER_DEFINED,,case_manifest.json,Полный адрес ожидает разрешения на публикацию
+building_type,school extension 200 places,,CONFIRMED,,pprk_registry.csv:PPRK-006,Пристройка к школе
+crane_count,1,count,CONFIRMED,,pprk_registry.csv:PPRK-006; sheets 01/01a/03/05,Один кран
+crane_model,CTT 181/B-8 TS21,,CONFIRMED,,pprk_registry.csv:PPRK-006; sheets 01/01a,Модель сводного реестра
+jib_length,55,m,CONFIRMED,,pprk_registry.csv:PPRK-006; sheets 01/01a/03/05,Установленная стрела
+hook_height_from_foundation,25.9,m,DIGITIZED,,pprk_registry.csv:PPRK-006; interpretation pending,Трактовка отметки требует подтверждения
+tip_capacity,2.9,t,CONFIRMED,,pprk_registry.csv:PPRK-006; crane data sheets,Грузоподъемность при 55 м
+maximum_documented_full_mass,5.8,t,CONFIRMED,,pprk_registry.csv:PPRK-006; load schedule,Максимальная полная масса по ведомости
+critical_radius,UNKNOWN,m,UNKNOWN,,source not yet localized,Расчет блокируется до подтверждения
+coordinate_system,UNKNOWN,m,UNKNOWN,,geometry requires digitization,Координаты не восстановлены

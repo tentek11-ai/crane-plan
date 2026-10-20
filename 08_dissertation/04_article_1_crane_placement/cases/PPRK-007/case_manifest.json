@@ -1,0 +1,58 @@
+{
+  "case_id": "PPRK-007",
+  "project_code": "10.04-20/00.000.ППРк",
+  "validation_status": "independent_pilot_accepted_for_implementation",
+  "identity_status": "CONFIRMED_PRIMARY_AND_AUTHOR_ATTESTED",
+  "address_publication_status": "street_confirmed_permission_pending",
+  "publication_address": "г. Москва, улица Новаторов",
+  "implementation": {
+    "year": 2026,
+    "status": "AUTHOR_REPORTED_PENDING_DOCUMENTARY_CONFIRMATION",
+    "attestation_sha256": "ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6",
+    "public_note": "Факт реализации сообщён автором; исполнительная документация и датированные подтверждения ещё не зарегистрированы"
+  },
+  "building": {
+    "type": "UNKNOWN",
+    "floors": "UNKNOWN",
+    "height_m": "UNKNOWN",
+    "dimensions_m": "UNKNOWN"
+  },
+  "site": {
+    "coordinate_system": "REQUIRES_DIGITIZATION",
+    "known_constraints": [
+      "здания",
+      "границы",
+      "дороги",
+      "склады",
+      "опасные и пересекающиеся зоны"
+    ],
+    "primary_source_set": "ППРк(1)",
+    "layout_note": "Два крана; три стадии совместной работы"
+  },
+  "crane": {
+    "count": 2,
+    "manufacturer": ["Potain", "Liebherr"],
+    "model": ["MD95", "71 EC"],
+    "jib": [
+      {"model": "MD95", "value": 35.0, "unit": "m", "status": "CONFIRMED"},
+      {"model": "71 EC", "value": 45.0, "unit": "m", "status": "CONFIRMED"}
+    ],
+    "hook_height": [
+      {"model": "MD95", "value": 42.2, "unit": "m", "status": "REQUIRES_INTERPRETATION"},
+      {"model": "71 EC", "value": 36.3, "unit": "m", "status": "REQUIRES_INTERPRETATION"}
+    ]
+  },
+  "critical_operations": [
+    {
+      "operation_id": "MAX_DOCUMENTED_FULL_MASS",
+      "mass": {"value": 5.2, "unit": "t", "status": "CONFIRMED"},
+      "critical_radius_m": "UNKNOWN"
+    }
+  ],
+  "source_files": [
+    "02_processed_data/pprk/PPRK-007/project_summary.md",
+    "02_processed_data/pprk/PPRK-007/source_traceability.md",
+    "02_processed_data/pprk/pprk_registry.csv",
+    "01_sources/03_pprk/01_original/ППРк(1)/Лист01.pdf"
+  ]
+}

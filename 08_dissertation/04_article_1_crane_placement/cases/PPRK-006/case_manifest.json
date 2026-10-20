@@ -1,0 +1,44 @@
+{
+  "case_id": "PPRK-006",
+  "project_code": "29.12-19/00.000.ППРк",
+  "validation_status": "retrospective",
+  "identity_status": "CONFIRMED_WITH_PENDING_PRIMARY_LOCATORS",
+  "address_publication_status": "pending_permission",
+  "publication_address": "Московская область, г. Люберцы",
+  "building": {
+    "type": "school_extension_200_places",
+    "floors": "UNKNOWN",
+    "height_m": "UNKNOWN",
+    "dimensions_m": "UNKNOWN"
+  },
+  "site": {
+    "coordinate_system": "REQUIRES_DIGITIZATION",
+    "known_constraints": [
+      "детский сад",
+      "дороги",
+      "склады",
+      "арматурный участок",
+      "опасные зоны"
+    ]
+  },
+  "crane": {
+    "count": 1,
+    "manufacturer": "Terex Comedil",
+    "model": "CTT 181/B-8 TS21",
+    "jib": {"value": 55.0, "unit": "m", "status": "CONFIRMED"},
+    "hook_height": {"value": 25.9, "unit": "m", "status": "REQUIRES_INTERPRETATION"},
+    "tip_capacity": {"value": 2.9, "unit": "t", "status": "CONFIRMED"}
+  },
+  "critical_operations": [
+    {
+      "operation_id": "MAX_DOCUMENTED_FULL_MASS",
+      "mass": {"value": 5.8, "unit": "t", "status": "CONFIRMED"},
+      "critical_radius_m": "UNKNOWN"
+    }
+  ],
+  "source_files": [
+    "02_processed_data/pprk/PPRK-006/project_summary.md",
+    "02_processed_data/pprk/PPRK-006/source_traceability.md",
+    "02_processed_data/pprk/pprk_registry.csv"
+  ]
+}

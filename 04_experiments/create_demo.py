@@ -46,7 +46,8 @@ project = ProjectInput(
 
 catalog = load_catalog(ROOT / "02_processed_data/cranes/crane_configurations.json")
 scenarios = optimize(project, catalog, max_variants=3, step_m=2.0)
-output = ROOT.parent / "outputs" / "CranePlan_demo_joint_cranes_1.5.1.pdf"
+output = ROOT / "output" / "pdf" / "CranePlan_demo_joint_cranes_2.0.0.pdf"
+output.parent.mkdir(parents=True, exist_ok=True)
 generate_report(output, project, scenarios)
 print(output)
 print([scenario.to_dict() for scenario in scenarios])

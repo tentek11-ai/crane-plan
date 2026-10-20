@@ -9,9 +9,9 @@
       "priority": 1,
       "jib_length_m": 60.0,
       "max_capacity_kg": 6000,
-      "max_free_standing_hook_height_m": 64.1,
+      "max_free_standing_hook_height_m": 44.4,
       "capacity_curve": [[20,6000],[22.5,6000],[25,6000],[27.5,5900],[30,5200],[32.5,4600],[35,4100],[37.5,3650],[40,3300],[42.5,2950],[45,2650],[47.5,2400],[50,2150],[52.5,1950],[55,1750],[57.5,1550],[60,1350]],
-      "source": "CRANE-CAT-001, full 60 m jib, conservative curve",
+      "source": "CRANE-CAT-001, full 60 m jib, conservative curve; free-standing baseline 44.4 m for preliminary tie-in selection",
       "status": "VERIFIED_FROM_CATALOG_TEXT"
     },
     {
