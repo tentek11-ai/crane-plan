@@ -5,23 +5,37 @@ from __future__ import annotations
 import json
 import math
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tkinter import filedialog, messagebox, ttk
+from uuid import uuid4
 
 from PIL import ImageTk
 
 from .catalog import load_catalog
-from .geometry import point_in_polygon, polygon_inside_polygon, validate_polygon
+from .geometry import point_in_polygon, polygon_inside_polygon, section_contour_height, validate_polygon
+from .engine import (
+    IntegrationStatus,
+    ScenarioVerificationV21,
+    default_release_index,
+    load_catalog_v3,
+    release_blockers,
+    save_protocol_atomic,
+    scenario_for_report,
+    verify_scenarios_v21,
+)
 from .library import load_library, open_local_path, resolve_local_file
 from .models import Load, ProjectInput, SiteInput, WorkPoint
 from .optimizer import optimize
-from .pdf_workspace import calibration_m_per_pixel, crop_pixel_box, inspect_pdf, normalize_crop_box, pixel_to_world, render_page, suggest_vector_bounds
+from .pdf_workspace import calibration_m_per_pixel, crop_pixel_box, display_size, inspect_pdf, normalize_crop_box, pixel_to_world, render_page, suggest_vector_bounds
 from .project_io import copy_source_pdf, create_project_folder, load_project, save_project
 from .report import generate_report
+from .user_cranes import add_user_crane, build_user_crane_payload, delete_user_crane, load_user_cranes
 
 
-APP_TITLE = "КранПлан 2.0.3 — BIM-среда предварительной расстановки башенных кранов"
+APP_VERSION = "2.2.2"
+APP_TITLE = f"КранПлан {APP_VERSION} — BIM-среда предварительной расстановки башенных кранов"
 
 
 def _sector_text(start, end):
@@ -72,8 +86,11 @@ class CranePlanApp(tk.Tk):
         self.configure(bg=UI["window"])
         self.resource_root = resource_root or Path(__file__).parents[2]
         self.catalog_path = self.resource_root / "02_processed_data/cranes/crane_configurations.json"
+        self.catalog_v3_path = self.resource_root / "02_processed_data/cranes/crane_configurations_v3.json"
         self.loads_path = self.resource_root / "02_processed_data/loads/standard_monolithic_loads.json"
         self.project_root = Path.home() / "Documents" / "КранПлан проекты"
+        self.user_crane_root = self.project_root / "Библиотека пользователя" / "краны"
+        self.user_catalog_path = self.user_crane_root / "user_cranes.json"
         self.plan_pdf = ""
         self.section_pdf = ""
         self.plan_crop_box = (0.0, 0.0, 1.0, 1.0)
@@ -117,6 +134,11 @@ class CranePlanApp(tk.Tk):
         self.closed_contours: set[str] = set()
         self.work_points: list[WorkPoint] = []
         self.scenarios = []
+        self.scenario_verifications = []
+        self.selected_release_index: int | None = None
+        self.calculation_input_snapshot: str | None = None
+        self.loads_verified = tk.BooleanVar(value=False)
+        self.release_variant_var = tk.StringVar(value="")
         self.report_page_order: list[int] | None = None
         self.report_excluded_pages: set[int] = set()
         self.loads = self._default_loads()
@@ -313,7 +335,7 @@ class CranePlanApp(tk.Tk):
         title_bar.pack(fill="x")
         title_bar.pack_propagate(False)
         tk.Label(title_bar, text="К", bg=UI["accent"], fg="white", width=3, font=("Segoe UI Semibold", 11)).pack(side="left", fill="y")
-        tk.Label(title_bar, text="КранПлан 2.0.3", bg="#171b1f", fg=UI["text"], font=("Segoe UI Semibold", 10), padx=10).pack(side="left")
+        tk.Label(title_bar, text=f"КранПлан {APP_VERSION}", bg="#171b1f", fg=UI["text"], font=("Segoe UI Semibold", 10), padx=10).pack(side="left")
         tk.Label(title_bar, text="Предварительная расстановка башенных кранов", bg="#171b1f", fg=UI["muted"], font=("Segoe UI", 9)).pack(side="left", padx=8)
         tk.Label(title_bar, text="BIM / ППРк", bg="#171b1f", fg=UI["muted"], font=("Segoe UI", 8), padx=12).pack(side="right")
 
@@ -493,6 +515,12 @@ class CranePlanApp(tk.Tk):
         actions = tk.Frame(right, bg=UI["panel"])
         actions.pack(fill="x")
         ttk.Button(actions, text="Открыть документ", command=open_selected, style="Accent.TButton").pack(side="left", padx=(0, 7))
+        if library_name == "cranes":
+            ttk.Button(
+                actions,
+                text="Добавить кран вручную",
+                command=lambda: self.show_user_crane_editor(dialog),
+            ).pack(side="left", padx=(0, 7))
         ttk.Button(actions, text="Открыть весь список", command=lambda: open_local_path(resolve_local_file(library_root, data.get("index_file", "index.html")))).pack(side="left")
         ttk.Button(actions, text="Открыть папку", command=lambda: open_local_path(library_root)).pack(side="right")
 
@@ -502,6 +530,205 @@ class CranePlanApp(tk.Tk):
             tree.selection_set("doc_0")
             show_selected()
         self.status.set(f"Открыта локальная библиотека: {data.get('title', '')}.")
+
+    def show_user_crane_editor(self, parent=None):
+        dialog = tk.Toplevel(self)
+        dialog.title("Пользовательский каталог башенных кранов")
+        dialog.geometry("1120x720")
+        dialog.minsize(940, 620)
+        dialog.configure(bg=UI["window"])
+        dialog.transient(parent or self)
+
+        head = tk.Frame(dialog, bg=UI["chrome"], padx=18, pady=12)
+        head.pack(fill="x")
+        tk.Label(
+            head,
+            text="Добавление башенного крана вручную",
+            bg=UI["chrome"], fg=UI["text"], font=("Segoe UI Semibold", 15),
+        ).pack(anchor="w")
+        tk.Label(
+            head,
+            text=("Введённые характеристики сразу участвуют в предварительном подборе, "
+                  "но результат всегда требует экспертной проверки по паспорту крана."),
+            bg=UI["chrome"], fg="#ffd166", font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(4, 0))
+
+        body = tk.PanedWindow(dialog, orient="horizontal", bg=UI["border"], sashwidth=4, bd=0)
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+        list_frame = tk.Frame(body, bg=UI["panel"])
+        form = tk.Frame(body, bg=UI["panel"], padx=16, pady=12)
+        body.add(list_frame, minsize=430, stretch="always")
+        body.add(form, minsize=460, width=560)
+
+        tree = ttk.Treeview(
+            list_frame,
+            columns=("jib", "capacity", "height"),
+            show="tree headings",
+            selectmode="browse",
+        )
+        tree.heading("#0", text="Изготовитель / модель")
+        tree.heading("jib", text="Стрела, м")
+        tree.heading("capacity", text="Макс., кг")
+        tree.heading("height", text="Своб. высота, м")
+        tree.column("#0", width=245, minwidth=180)
+        tree.column("jib", width=75, anchor="center")
+        tree.column("capacity", width=90, anchor="e")
+        tree.column("height", width=100, anchor="center")
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        variables = {
+            "manufacturer": tk.StringVar(),
+            "model": tk.StringVar(),
+            "jib_length_m": tk.StringVar(),
+            "max_capacity_kg": tk.StringVar(),
+            "max_free_standing_hook_height_m": tk.StringVar(),
+        }
+        labels = (
+            ("Изготовитель", "manufacturer"),
+            ("Модель", "model"),
+            ("Длина стрелы, м", "jib_length_m"),
+            ("Максимальная грузоподъёмность, кг", "max_capacity_kg"),
+            ("Максимальная высота свободного стояния, м", "max_free_standing_hook_height_m"),
+        )
+        form.columnconfigure(1, weight=1)
+        for row, (label, key) in enumerate(labels):
+            tk.Label(form, text=label, bg=UI["panel"], fg=UI["text"], anchor="w").grid(
+                row=row, column=0, sticky="w", padx=(0, 12), pady=4
+            )
+            ttk.Entry(form, textvariable=variables[key]).grid(row=row, column=1, sticky="ew", pady=4)
+
+        curve_row = len(labels)
+        tk.Label(
+            form,
+            text="Грузовая характеристика: одна строка «вылет, м; груз, кг»",
+            bg=UI["panel"], fg=UI["text"], anchor="w",
+        ).grid(row=curve_row, column=0, columnspan=2, sticky="w", pady=(10, 4))
+        curve_text = tk.Text(
+            form, height=10, bg=UI["field"], fg=UI["text"], insertbackground=UI["text"],
+            relief="flat", font=("Consolas", 9), padx=8, pady=8,
+        )
+        curve_text.grid(row=curve_row + 1, column=0, columnspan=2, sticky="nsew")
+        form.rowconfigure(curve_row + 1, weight=1)
+
+        tk.Label(form, text="Примечание / источник", bg=UI["panel"], fg=UI["text"]).grid(
+            row=curve_row + 2, column=0, columnspan=2, sticky="w", pady=(10, 4)
+        )
+        notes_text = tk.Text(
+            form, height=4, bg=UI["field"], fg=UI["text"], insertbackground=UI["text"],
+            relief="flat", wrap="word", padx=8, pady=8,
+        )
+        notes_text.grid(row=curve_row + 3, column=0, columnspan=2, sticky="ew")
+
+        brochure_var = tk.StringVar()
+        brochure_line = tk.Frame(form, bg=UI["panel"])
+        brochure_line.grid(row=curve_row + 4, column=0, columnspan=2, sticky="ew", pady=(10, 4))
+        brochure_line.columnconfigure(0, weight=1)
+        ttk.Entry(brochure_line, textvariable=brochure_var, state="readonly").grid(row=0, column=0, sticky="ew")
+
+        def choose_brochure():
+            path = filedialog.askopenfilename(
+                title="Выберите PDF-брошюру крана", filetypes=[("PDF", "*.pdf")], parent=dialog
+            )
+            if path:
+                brochure_var.set(path)
+
+        ttk.Button(brochure_line, text="Выбрать PDF-брошюру", command=choose_brochure).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+
+        entries_by_iid = {}
+
+        def reload_entries(select_id=None):
+            tree.delete(*tree.get_children())
+            entries_by_iid.clear()
+            try:
+                entries = load_user_cranes(self.user_catalog_path)
+            except Exception as exc:
+                messagebox.showerror("Каталог не открыт", str(exc), parent=dialog)
+                return
+            for index, entry in enumerate(entries):
+                iid = f"user_{index}"
+                entries_by_iid[iid] = entry
+                tree.insert(
+                    "", "end", iid=iid,
+                    text=f"{entry.get('manufacturer', '')} {entry.get('model', '')}".strip(),
+                    values=(
+                        f"{float(entry.get('jib_length_m', 0)):g}",
+                        f"{float(entry.get('max_capacity_kg', 0)):g}",
+                        f"{float(entry.get('max_free_standing_hook_height_m', 0)):g}",
+                    ),
+                )
+                if entry.get("id") == select_id:
+                    tree.selection_set(iid)
+                    tree.see(iid)
+
+        def save_entry():
+            fields = {key: variable.get() for key, variable in variables.items()}
+            fields["capacity_curve"] = curve_text.get("1.0", "end")
+            fields["notes"] = notes_text.get("1.0", "end")
+            try:
+                payload = build_user_crane_payload(fields)
+                entry = add_user_crane(
+                    self.user_catalog_path,
+                    payload,
+                    brochure_var.get().strip() or None,
+                )
+            except Exception as exc:
+                messagebox.showerror("Кран не добавлен", str(exc), parent=dialog)
+                return
+            reload_entries(entry["id"])
+            self._reset_calculation_results()
+            self.status.set(f"Добавлен пользовательский кран: {entry['model']}.")
+            messagebox.showinfo(
+                "Кран добавлен",
+                "Конфигурация включена в предварительный подбор. Перед выпуском ППРк "
+                "обязательно проверьте грузовую характеристику по паспорту изготовителя.",
+                parent=dialog,
+            )
+
+        def selected_entry():
+            selection = tree.selection()
+            return entries_by_iid.get(selection[0]) if selection else None
+
+        def remove_selected():
+            entry = selected_entry()
+            if not entry:
+                messagebox.showinfo("Удаление", "Выберите пользовательский кран.", parent=dialog)
+                return
+            if not messagebox.askyesno(
+                "Удалить конфигурацию",
+                f"Удалить {entry.get('manufacturer', '')} {entry.get('model', '')}?",
+                parent=dialog,
+            ):
+                return
+            try:
+                delete_user_crane(self.user_catalog_path, entry["id"])
+            except Exception as exc:
+                messagebox.showerror("Кран не удалён", str(exc), parent=dialog)
+                return
+            reload_entries()
+            self._reset_calculation_results()
+            self.status.set("Пользовательская конфигурация крана удалена.")
+
+        def open_brochure():
+            entry = selected_entry()
+            if not entry or not entry.get("brochure_file"):
+                messagebox.showinfo("Брошюра", "Для выбранного крана PDF-брошюра не приложена.", parent=dialog)
+                return
+            try:
+                open_local_path(resolve_local_file(self.user_crane_root, entry["brochure_file"]))
+            except Exception as exc:
+                messagebox.showerror("Брошюра не открыта", str(exc), parent=dialog)
+
+        buttons = tk.Frame(form, bg=UI["panel"])
+        buttons.grid(row=curve_row + 5, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(buttons, text="Добавить в каталог", command=save_entry, style="Accent.TButton").pack(side="left")
+        ttk.Button(buttons, text="Открыть брошюру", command=open_brochure).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Удалить выбранный", command=remove_selected).pack(side="right")
+        reload_entries()
 
     def _on_tab_changed(self, _event=None):
         index = self.notebook.index(self.notebook.select())
@@ -684,6 +911,12 @@ class CranePlanApp(tk.Tk):
         ttk.Button(buttons, text="Редактировать выбранный", command=self.edit_load).pack(side="left")
         ttk.Button(buttons, text="Добавить нестандартный груз", command=lambda: self.edit_load(new=True)).pack(side="left", padx=6)
         ttk.Button(buttons, text="Удалить выбранный груз", command=self.delete_load).pack(side="left", padx=6)
+        ttk.Checkbutton(
+            frame,
+            text="Массы грузов и оснастки сверены с проектными документами",
+            variable=self.loads_verified,
+            command=self._reset_calculation_results,
+        ).pack(anchor="w", padx=10, pady=(4, 10))
 
     def _build_calculation_tab(self):
         frame = self.tabs["5. Расчёт"]
@@ -704,6 +937,18 @@ class CranePlanApp(tk.Tk):
         ttk.Checkbutton(options, text="Есть коммерческое предложение", variable=self.commercial_offer).grid(row=7,column=1,columnspan=2,sticky="w",pady=4)
         self.daily_cost = self._field(options, 8, "Стоимость одного крана в сутки, руб.", "0", 14)
         ttk.Button(frame, text="РАССЧИТАТЬ ДО 3 ВАРИАНТОВ", command=self.run_calculation, style="Accent.TButton").pack(pady=8)
+        release_bar = ttk.Frame(frame)
+        release_bar.pack(fill="x", padx=10, pady=(0, 4))
+        ttk.Label(release_bar, text="Вариант для выпуска:").pack(side="left")
+        self.release_variant_combo = ttk.Combobox(
+            release_bar,
+            textvariable=self.release_variant_var,
+            values=(),
+            state="readonly",
+            width=52,
+        )
+        self.release_variant_combo.pack(side="left", padx=8)
+        self.release_variant_combo.bind("<<ComboboxSelected>>", lambda _event: self._selected_release_index())
         self.results = tk.Text(frame, height=24, wrap="word", bg=UI["field"], fg=UI["text"], insertbackground=UI["text"], selectbackground=UI["selection"], relief="flat", padx=10, pady=8)
         self.results.pack(fill="both", expand=True, padx=10, pady=8)
 
@@ -731,7 +976,7 @@ class CranePlanApp(tk.Tk):
                 (self.daily_cost,project.commercial_offer_daily_cost),
                 (self.floors,project.floors),(self.tie_length,project.tie_length_m),(self.tie_angle,project.tie_angle_deg),
             ): var.set(str(value))
-            self.priority.set(project.priority); self.screen_possible.set(project.protective_screen_possible); self.commercial_offer.set(project.commercial_offer_present); self.tie_ins_possible.set(project.tie_ins_possible)
+            self.priority.set(project.priority); self.screen_possible.set(project.protective_screen_possible); self.commercial_offer.set(project.commercial_offer_present); self.tie_ins_possible.set(project.tie_ins_possible); self.loads_verified.set(project.loads_verified)
             self.site_points=list(project.site.boundary); self.building_points=list(project.site.building); self.restricted_zones=[list(z) for z in project.site.restricted_zones]
             self.unloading_points=list(project.site.unloading_zone); self.storage_zones=[list(z) for z in project.site.storage_zones]; self.work_points=list(project.work_points)
             self.current_zone_points=[]; self.current_storage_points=[]; self.closed_contours={"site","building"}
@@ -741,6 +986,7 @@ class CranePlanApp(tk.Tk):
             self.section_origin_px=(project.section_origin_x_px,project.section_origin_y_px) if self.section_m_per_pixel else None
             self.section_axis=(project.section_axis_dx,project.section_axis_dy)
             self.section_building_points=list(project.section_building_contour); self.section_contour_closed=bool(self.section_building_points)
+            self._normalize_section_building_reference()
             self.plan_crop_box=normalize_crop_box(project.plan_crop_box); self.section_crop_box=normalize_crop_box(project.section_crop_box)
             self.plan_background_intensity.set(str(round(project.plan_background_intensity*100)))
             self.section_background_intensity.set(str(round(project.section_background_intensity*100)))
@@ -755,7 +1001,7 @@ class CranePlanApp(tk.Tk):
             if self.section_pdf:
                 self.section_label.config(text=Path(self.section_pdf).name); self._show_section(); self._redraw_section_calibration()
             else: self.section_label.config(text="Исходный разрез не найден; выберите PDF повторно")
-            self.scenarios=[]; self.report_page_order=None; self.report_excluded_pages.clear()
+            self._reset_calculation_results(); self.report_page_order=None; self.report_excluded_pages.clear()
             self.status.set(f"Проект открыт: {Path(path).parent}")
         except Exception as exc: messagebox.showerror("Проект не открыт",str(exc))
 
@@ -780,8 +1026,11 @@ class CranePlanApp(tk.Tk):
 
     def _redraw_section_calibration(self):
         if not self.section_origin_px or not self.section_m_per_pixel: return
-        p1=self.section_origin_px; distance=float(self.parapet.get())-float(self.pit_bottom.get())
-        p2=(p1[0]+self.section_axis[0]*distance/self.section_m_per_pixel,p1[1]+self.section_axis[1]*distance/self.section_m_per_pixel)
+        if len(self.section_calibration_points) >= 2:
+            p1,p2=self.section_calibration_points[:2]
+        else:
+            p1=self.section_origin_px; distance=float(self.parapet.get())-float(self.pit_bottom.get())
+            p2=(p1[0]+self.section_axis[0]*distance/self.section_m_per_pixel,p1[1]+self.section_axis[1]*distance/self.section_m_per_pixel)
         for p in (p1,p2):
             x,y=p[0]*self.section_image_scale,p[1]*self.section_image_scale; self.section_canvas.create_oval(x-4,y-4,x+4,y+4,fill=DRAW_COLORS["section"],tags="section_markup")
         self.section_canvas.create_line(p1[0]*self.section_image_scale,p1[1]*self.section_image_scale,p2[0]*self.section_image_scale,p2[1]*self.section_image_scale,fill=DRAW_COLORS["section"],width=2,tags="section_markup")
@@ -794,6 +1043,17 @@ class CranePlanApp(tk.Tk):
     def _section_world_to_pixel(self,point):
         horizontal,height=point; ux,uy=self.section_axis
         return (self.section_origin_px[0]+(height*ux+horizontal*uy)/self.section_m_per_pixel,self.section_origin_px[1]+(height*uy-horizontal*ux)/self.section_m_per_pixel)
+
+    def _normalize_section_building_reference(self):
+        """Use the contour bottom as height zero without moving its PDF overlay."""
+        if not self.section_building_points or not self.section_origin_px or not self.section_m_per_pixel:
+            return
+        bottom=min(height for _,height in self.section_building_points)
+        if abs(bottom)<=1e-9:
+            return
+        ux,uy=self.section_axis; shift=bottom/self.section_m_per_pixel
+        self.section_origin_px=(self.section_origin_px[0]+ux*shift,self.section_origin_px[1]+uy*shift)
+        self.section_building_points=[(horizontal,height-bottom) for horizontal,height in self.section_building_points]
 
     def _redraw_section_building_contour(self):
         self.section_canvas.delete("section_building")
@@ -846,8 +1106,8 @@ class CranePlanApp(tk.Tk):
         self.plan_fit_scale=min(max_w/image.width,max_h/image.height,1.0)
         factor=max(0.05,min(8.0,self.plan_fit_scale*self.plan_zoom))
         self.image_scale = factor
-        if factor < 1:
-            image = image.resize((int(image.width * factor), int(image.height * factor)))
+        if factor != 1:
+            image = image.resize(display_size(image.size, factor))
         self.plan_image = image
         self.plan_photo = ImageTk.PhotoImage(image)
         self.canvas.delete("all")
@@ -863,8 +1123,8 @@ class CranePlanApp(tk.Tk):
         self.section_fit_scale=min(max_w/image.width,max_h/image.height,1.0)
         factor=max(0.05,min(8.0,self.section_fit_scale*self.section_zoom))
         self.section_image_scale = factor
-        if factor < 1:
-            image = image.resize((int(image.width * factor), int(image.height * factor)))
+        if factor != 1:
+            image = image.resize(display_size(image.size, factor))
         self.section_image = image; self.section_photo = ImageTk.PhotoImage(image)
         self.section_canvas.delete("all")
         self.section_canvas.create_image(0, 0, image=self.section_photo, anchor="nw", tags="pdf")
@@ -1030,7 +1290,7 @@ class CranePlanApp(tk.Tk):
             self.status.set(f"Контур здания на разрезе: {len(self.section_building_points)} точек. После последней нажмите «Замкнуть»."); return
         if len(self.section_calibration_points)>=2: self.start_section_calibration()
         self.section_calibration_points.append(point)
-        self.section_canvas.create_oval(event.x-4,event.y-4,event.x+4,event.y+4,fill=DRAW_COLORS["section"],tags="section_markup")
+        self.section_canvas.create_oval(vx-4,vy-4,vx+4,vy+4,fill=DRAW_COLORS["section"],tags="section_markup")
         if len(self.section_calibration_points)==2:
             try:
                 p1,p2=self.section_calibration_points; distance=float(self.section_distance_var.get())
@@ -1049,6 +1309,7 @@ class CranePlanApp(tk.Tk):
     def finish_section_building_contour(self):
         if self.section_mode!="building" or len(self.section_building_points)<3:
             messagebox.showwarning("Недостаточно точек","Для контура здания требуется минимум три точки."); return
+        self._normalize_section_building_reference()
         self.section_contour_closed=True; self._redraw_section_building_contour(); self.scenarios=[]; self.status.set("Контур здания на разрезе замкнут.")
 
     def undo_section_contour_point(self):
@@ -1196,7 +1457,7 @@ class CranePlanApp(tk.Tk):
                 if not row[0] or row[1]<=0 or row[2]<0 or min(row[3:6])<=0 or row[6]<=0: raise ValueError("Проверьте название, массы, габариты и количество подъёмов")
                 if new or not selected: self.load_tree.insert("","end",values=row)
                 else: self.load_tree.item(selected[0],values=row)
-                dialog.destroy(); self.scenarios=[]
+                dialog.destroy(); self._invalidate_load_confirmation()
             except Exception as exc: messagebox.showerror("Груз не сохранён",str(exc),parent=dialog)
         ttk.Button(dialog,text="Сохранить",command=apply).grid(row=8,column=0,columnspan=2,pady=8)
 
@@ -1210,8 +1471,101 @@ class CranePlanApp(tk.Tk):
         for wp in self.work_points:
             if wp.load_index==index: wp.load_index=0
             elif wp.load_index>index: wp.load_index-=1
-        self.scenarios=[]
+        self._invalidate_load_confirmation()
         self.status.set("Груз удалён. Точки, относившиеся к нему, переназначены на первый груз; проверьте их.")
+
+    def _invalidate_load_confirmation(self) -> None:
+        self.loads_verified.set(False)
+        self._reset_calculation_results()
+
+    def _reset_calculation_results(self) -> None:
+        self.scenarios = []
+        self.scenario_verifications = []
+        self.selected_release_index = None
+        self.calculation_input_snapshot = None
+        if "release_variant_var" in self.__dict__:
+            self.release_variant_var.set("")
+        if "release_variant_combo" in self.__dict__:
+            self.release_variant_combo.configure(values=())
+
+    def _selected_release_index(self) -> int | None:
+        value = self.release_variant_var.get().strip() if "release_variant_var" in self.__dict__ else ""
+        if value.startswith("Вариант "):
+            token = value.split(" ", 2)[1]
+            try:
+                candidate = int(token) - 1
+            except ValueError:
+                candidate = -1
+            if 0 <= candidate < len(self.scenario_verifications):
+                self.selected_release_index = candidate
+        if self.selected_release_index is None or not 0 <= self.selected_release_index < len(self.scenario_verifications):
+            return None
+        return self.selected_release_index
+
+    @staticmethod
+    def _project_snapshot(project: ProjectInput) -> str:
+        return json.dumps(project.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _calculation_is_current(self, project: ProjectInput) -> bool:
+        return self.calculation_input_snapshot == self._project_snapshot(project)
+
+    def _refresh_release_variant_choices(self) -> None:
+        choices = tuple(
+            f"Вариант {index + 1} — {verification.status.value}"
+            for index, verification in enumerate(self.scenario_verifications)
+        )
+        self.release_variant_combo.configure(values=choices)
+        self.selected_release_index = default_release_index(self.scenario_verifications)
+        self.release_variant_var.set(
+            choices[self.selected_release_index] if self.selected_release_index is not None else ""
+        )
+
+    def _render_scenario_verification(self, verification: ScenarioVerificationV21) -> str:
+        labels = {
+            IntegrationStatus.VERIFIED: "ПРОВЕРЕН",
+            IntegrationStatus.VERIFIED_WITH_CONDITIONS: "ПРОВЕРЕН С УСЛОВИЯМИ",
+            IntegrationStatus.EXPERT_REVIEW_REQUIRED: "ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА",
+            IntegrationStatus.REJECTED: "ОТКЛОНЁН",
+        }
+        lines = [f"  НЕЗАВИСИМАЯ ПРОВЕРКА ЯДРОМ 2.1: {labels[verification.status]}"]
+        engine_result = verification.engine_result
+        checked = engine_result.accepted_solution if engine_result and engine_result.accepted_solution else (
+            engine_result.protocol.solution if engine_result and engine_result.protocol else None
+        )
+        if checked and checked.stages and checked.stages[0].placements:
+            lines.append(f"    Конфигурация: {checked.stages[0].placements[0].configuration_id}")
+        checks = engine_result.verification.checks if engine_result and engine_result.verification else ()
+        capacity_checks = [check for check in checks if check.code == "CAPACITY_INSUFFICIENT"]
+        if capacity_checks:
+            critical = min(capacity_checks, key=lambda check: float(check.limit) - float(check.measured_value))
+            margin = float(critical.limit) - float(critical.measured_value)
+            lines.append(
+                f"    Критическая операция: {critical.operation_id or '—'}; "
+                f"масса {float(critical.measured_value):g} кг; доступно {float(critical.limit):g} кг; запас {margin:g} кг"
+            )
+        reach_checks = [check for check in checks if check.code == "REACH"]
+        if reach_checks:
+            maximum = max(float(check.measured_value) for check in reach_checks)
+            lines.append(f"    Максимальный вылет: {maximum:g} м")
+        height_checks = [check for check in checks if check.code == "HEIGHT"]
+        if height_checks:
+            critical_height = min(height_checks, key=lambda check: float(check.limit) - float(check.measured_value))
+            margin = float(critical_height.limit) - float(critical_height.measured_value)
+            lines.append(
+                f"    Высота крюка: требуется {float(critical_height.measured_value):g} м; "
+                f"доступно {float(critical_height.limit):g} м; запас {margin:g} м"
+            )
+        for message in verification.messages:
+            lines.append(f"    • {message}")
+        if verification.protocol:
+            lines.extend(
+                (
+                    f"    Протокол: {verification.protocol.run_id}",
+                    f"    SHA-256 входа: {verification.protocol.input_sha256}",
+                    f"    SHA-256 результата: {verification.protocol.result_sha256}",
+                )
+            )
+        return "\n".join(lines) + "\n"
 
     def _add_work_point_dialog(self, world, canvas_point):
         loads=self._collect_loads()
@@ -1296,8 +1650,8 @@ class CranePlanApp(tk.Tk):
             for wp in self.work_points:
                 if wp.level_m>height+.5 and not wp.special_roof_load: blockers.append(f"{wp.name}: отметка {wp.level_m:g} м выше парапета {height:g} м. Исправьте её или отметьте специальный подъём.")
             if self.section_building_points:
-                section_top=max(y for _,y in self.section_building_points)
-                if abs(section_top-height)>.5: blockers.append(f"Высота по контуру разреза {section_top:.2f} м не совпадает с ручной высотой {height:.2f} м (допуск 0,5 м).")
+                section_height=section_contour_height(self.section_building_points)
+                if abs(section_height-height)>.5: blockers.append(f"Высота по контуру разреза {section_height:.2f} м не совпадает с ручной высотой {height:.2f} м (допуск 0,5 м).")
         except ValueError: blockers.append("Заполните отметки низа котлована и верха парапета числами.")
         try:
             year=int(self.year.get())
@@ -1359,6 +1713,7 @@ class CranePlanApp(tk.Tk):
             floors=int(self.floors.get()),tie_ins_possible=self.tie_ins_possible.get(),tie_length_m=float(self.tie_length.get()),tie_angle_deg=float(self.tie_angle.get()),
             section_building_contour=self.section_building_points,
             restricted_zones_confirmed=self.no_restricted_confirmed.get() or bool(self.restricted_zones),
+            loads_verified=self.loads_verified.get(),
         )
         if self.origin_px and self.m_per_pixel:
             project.plan_origin_x_px = self.origin_px[0]
@@ -1376,11 +1731,12 @@ class CranePlanApp(tk.Tk):
         try:
             blockers,reminders=self._input_issues()
             if blockers:
-                self.scenarios=[]; self._show_input_check(blockers,reminders)
+                self._reset_calculation_results(); self._show_input_check(blockers,reminders)
                 self.status.set("Расчёт не запущен: исправьте пункты проверки исходных данных.")
                 messagebox.showwarning("Нужно дополнить исходные данные",f"Обнаружено обязательных пунктов: {len(blockers)}. Подробности показаны на вкладке расчёта.")
                 return
-            project=self._project(); catalog=load_catalog(self.catalog_path); self.scenarios=optimize(project,catalog,3,2.0)
+            self._reset_calculation_results()
+            project=self._project(); catalog=load_catalog(self.catalog_path,self.user_catalog_path); self.scenarios=optimize(project,catalog,3,2.0)
             self.report_page_order=None; self.report_excluded_pages.clear(); self.report_selection_var.set("Состав листов: полный комплект по умолчанию")
             self.results.delete("1.0","end")
             if self.scenarios and self.scenarios[0].status=="BLOCKED":
@@ -1392,6 +1748,33 @@ class CranePlanApp(tk.Tk):
                 self.status.set("Подходящий вариант не найден. Причины и рекомендации показаны в расчёте.")
                 messagebox.showwarning("Вариант не найден","Программа определила причины отказа. Они показаны на вкладке расчёта.")
                 return
+            run_id=f"GUI-{datetime.now().astimezone():%Y%m%dT%H%M%S}-{uuid4().hex[:8]}"
+            created_at=datetime.now().astimezone().isoformat(timespec="seconds")
+            try:
+                catalog_v3=load_catalog_v3(self.catalog_v3_path)
+                self.scenario_verifications=list(
+                    verify_scenarios_v21(
+                        project,
+                        self.scenarios,
+                        catalog_v3,
+                        run_id=run_id,
+                        created_at=created_at,
+                    )
+                )
+            except Exception as exc:
+                self.scenario_verifications=[
+                    ScenarioVerificationV21(
+                        index,
+                        IntegrationStatus.EXPERT_REVIEW_REQUIRED,
+                        False,
+                        (f"V3_CATALOG_UNAVAILABLE: каталог V3 не загружен: {exc}",),
+                        None,
+                        None,
+                    )
+                    for index,_scenario in enumerate(self.scenarios)
+                ]
+            self.calculation_input_snapshot=self._project_snapshot(project)
+            self._refresh_release_variant_choices()
             for i,s in enumerate(self.scenarios,1):
                 self.results.insert("end",f"ВАРИАНТ {i}: {s.status}\n")
                 for j,p in enumerate(s.placements,1):
@@ -1409,6 +1792,8 @@ class CranePlanApp(tk.Tk):
                 if s.crane_work_hours:
                     self.results.insert("end","  Загрузка: "+", ".join(f"К{n+1} — {hours:.1f} ч" for n,hours in enumerate(s.crane_work_hours))+"\n")
                 for text in s.warnings+s.reasons: self.results.insert("end",f"  • {text}\n")
+                if i-1 < len(self.scenario_verifications):
+                    self.results.insert("end",self._render_scenario_verification(self.scenario_verifications[i-1]))
                 self.results.insert("end","\n")
             if reminders:
                 self.results.insert("end","ДОПОЛНИТЬ ДЛЯ ПОЛНОГО ППРк:\n")
@@ -1421,10 +1806,24 @@ class CranePlanApp(tk.Tk):
         try:
             if not self.scenarios: self.run_calculation()
             if not self.scenarios: return
-            project=self._project(); temp=TemporaryDirectory(prefix="craneplan_preview_")
+            selected_index=self._selected_release_index()
+            if selected_index is None or selected_index>=len(self.scenario_verifications):
+                messagebox.showwarning("Выберите вариант","Выберите рассчитанный вариант для предпросмотра.")
+                return
+            verification=self.scenario_verifications[selected_index]
+            report_scenario=scenario_for_report(self.scenarios[selected_index],verification)
+            document_status={
+                IntegrationStatus.EXPERT_REVIEW_REQUIRED:"НЕ ДЛЯ ВЫПУСКА — ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА",
+                IntegrationStatus.REJECTED:"НЕ ДЛЯ ВЫПУСКА — ВАРИАНТ ОТКЛОНЁН",
+            }.get(verification.status)
+            project=self._project()
+            if not self._calculation_is_current(project):
+                messagebox.showwarning("Расчёт устарел","Исходные данные изменены после расчёта. Выполните расчёт повторно.")
+                return
+            temp=TemporaryDirectory(prefix="craneplan_preview_")
             preview_path=Path(temp.name)/"preview.pdf"
             self.status.set("Формируется предпросмотр листов..."); self.update_idletasks()
-            generate_report(preview_path,project,self.scenarios)
+            generate_report(preview_path,project,[report_scenario],document_status=document_status)
             from pypdf import PdfReader
             reader=PdfReader(str(preview_path)); page_count=len(reader.pages); titles=[]
             for number,page in enumerate(reader.pages,1):
@@ -1500,22 +1899,47 @@ class CranePlanApp(tk.Tk):
         try:
             if not self.scenarios: self.run_calculation()
             if not self.scenarios: return
+            selected_index=self._selected_release_index()
+            verification_issues=release_blockers(self.scenario_verifications,selected_index)
+            if verification_issues:
+                messagebox.showwarning(
+                    "Выпуск ППРк заблокирован",
+                    "\n".join("• "+item for item in verification_issues),
+                )
+                return
+            verification=self.scenario_verifications[selected_index]
+            selected_scenario=self.scenarios[selected_index]
+            project=self._project()
+            if not self._calculation_is_current(project):
+                messagebox.showwarning("Выпуск ППРк заблокирован","Исходные данные изменены после расчёта. Выполните расчёт повторно.")
+                return
             release_issues=[]
-            if not self.project_name.get().strip(): release_issues.append("Не заполнено название объекта.")
-            if not self.city.get().strip(): release_issues.append("Не заполнен город.")
-            if not self.unloading_points: release_issues.append("Не нанесена зона разгрузки.")
-            if not self.storage_zones: release_issues.append("Не нанесена зона складирования.")
-            if not self.restricted_zones and not self.no_restricted_confirmed.get(): release_issues.append("Не подтверждено наличие или отсутствие запретных зон.")
-            if any(s.accounted_lifts!=s.total_active_lifts for s in self.scenarios): release_issues.append("Не все активные подъёмы учтены в расчёте.")
+            if not project.name.strip(): release_issues.append("Не заполнено название объекта.")
+            if not project.city.strip(): release_issues.append("Не заполнен город.")
+            if not project.site.unloading_zone: release_issues.append("Не нанесена зона разгрузки.")
+            if not project.site.storage_zones: release_issues.append("Не нанесена зона складирования.")
+            if not project.site.restricted_zones and not project.restricted_zones_confirmed: release_issues.append("Не подтверждено наличие или отсутствие запретных зон.")
+            if selected_scenario.accounted_lifts!=selected_scenario.total_active_lifts: release_issues.append("Не все активные подъёмы учтены в расчёте.")
             if release_issues:
                 messagebox.showwarning("Выпуск ППРк заблокирован","Дополните исходные данные:\n\n"+"\n".join("• "+item for item in release_issues)); return
-            project=self._project(); self.project_root.mkdir(parents=True,exist_ok=True)
+            if verification.protocol is None:
+                messagebox.showwarning("Выпуск ППРк заблокирован","Для выбранного варианта отсутствует расчётный протокол ядра 2.1.")
+                return
+            self.project_root.mkdir(parents=True,exist_ok=True)
             folder=create_project_folder(self.project_root,project)
             if self.plan_pdf: project.source_plan_pdf=str(copy_source_pdf(self.plan_pdf,folder,"план"))
             if self.section_pdf: project.source_section_pdf=str(copy_source_pdf(self.section_pdf,folder,"разрез"))
-            save_project(folder,project,[s.to_dict() for s in self.scenarios])
+            save_project(
+                folder,
+                project,
+                [s.to_dict() for s in self.scenarios],
+                selected_scenario_index=selected_index,
+                scenario_verifications=[item.to_dict() for item in self.scenario_verifications],
+            )
             selected_pages=None if self.report_page_order is None else [page for page in self.report_page_order if page not in self.report_excluded_pages]
-            report=generate_report(folder/"reports"/"ППРк_предварительный.pdf",project,self.scenarios,selected_pages=selected_pages)
+            report_scenario=scenario_for_report(selected_scenario,verification)
+            save_protocol_atomic(folder/"reports"/"calculation_protocol_v21.json",verification.protocol)
+            report=generate_report(folder/"reports"/"ППРк_предварительный.pdf",project,[report_scenario],selected_pages=selected_pages)
             self.report_path_var.set(f"Готово: {report}")
             self.status.set("Проект и PDF сохранены.")
             messagebox.showinfo("Готово",f"Проект сохранён:\n{folder}")

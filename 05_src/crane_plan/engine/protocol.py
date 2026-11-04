@@ -8,6 +8,7 @@ from enum import Enum
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -150,4 +151,17 @@ def save_protocol(path: str | Path, protocol: CalculationProtocolV3) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(canonical_json(protocol) + "\n", encoding="utf-8")
+    return target
+
+
+def save_protocol_atomic(path: str | Path, protocol: CalculationProtocolV3) -> Path:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    try:
+        temporary.write_text(canonical_json(protocol) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return target

@@ -29,13 +29,22 @@ def create_project_folder(root: str | Path, project: ProjectInput) -> Path:
     return folder
 
 
-def save_project(folder: str | Path, project: ProjectInput, scenarios: list[dict] | None = None) -> Path:
+def save_project(
+    folder: str | Path,
+    project: ProjectInput,
+    scenarios: list[dict] | None = None,
+    *,
+    selected_scenario_index: int | None = None,
+    scenario_verifications: list[dict] | None = None,
+) -> Path:
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     payload = project.to_dict()
     payload["schema_version"] = 2
     payload["saved_at"] = datetime.now().isoformat(timespec="seconds")
     payload["scenarios"] = scenarios or []
+    payload["selected_scenario_index"] = selected_scenario_index
+    payload["scenario_verifications"] = scenario_verifications or []
     target = folder / "project.json"
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     temporary = target.with_suffix(".json.tmp")

@@ -17,6 +17,14 @@ MAX_PDF_PAGES = 200
 MAX_RENDER_SCALE = 4.0
 
 
+def display_size(source_size: tuple[int, int], scale: float) -> tuple[int, int]:
+    """Return the raster size used by Canvas for a document zoom level."""
+    if scale <= 0:
+        raise ValueError("Масштаб вида должен быть положительным")
+    width, height = source_size
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
 def _validate_pdf_file(path: Path) -> None:
     if not path.is_file():
         raise ValueError("PDF-файл не найден")

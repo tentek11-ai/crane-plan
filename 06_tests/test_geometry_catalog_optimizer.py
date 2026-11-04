@@ -9,9 +9,10 @@ ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "05_src"))
 
 from crane_plan.catalog import allowed_capacity_kg, load_catalog  # noqa: E402
-from crane_plan.geometry import distance_to_polygon, point_in_polygon  # noqa: E402
+from crane_plan.geometry import distance_to_polygon, point_in_polygon, section_contour_height  # noqa: E402
 from crane_plan.models import CraneConfiguration, Load, ProjectInput, SiteInput, WorkPoint  # noqa: E402
 from crane_plan.optimizer import optimize  # noqa: E402
+from crane_plan.user_cranes import add_user_crane  # noqa: E402
 
 
 class GeometryTests(unittest.TestCase):
@@ -23,6 +24,11 @@ class GeometryTests(unittest.TestCase):
 
     def test_distance_to_boundary(self):
         self.assertEqual(distance_to_polygon((5, 5), self.square), 5)
+
+    def test_section_height_is_extent_not_absolute_top_coordinate(self):
+        contour = [(0, 2.95), (12, 2.95), (12, 33.95), (0, 33.95)]
+
+        self.assertAlmostEqual(section_contour_height(contour), 31.0)
 
 
 class CatalogTests(unittest.TestCase):
@@ -43,6 +49,59 @@ class CatalogTests(unittest.TestCase):
 
     def test_outside_jib_is_zero(self):
         self.assertEqual(allowed_capacity_kg(self.catalog[0], 61), 0)
+
+    def test_user_catalog_is_merged_after_verified_configurations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_path = Path(tmp) / "user_cranes.json"
+            added = add_user_crane(
+                user_path,
+                {
+                    "manufacturer": "Test",
+                    "model": "Manual 10",
+                    "jib_length_m": 20,
+                    "max_capacity_kg": 2000,
+                    "max_free_standing_hook_height_m": 30,
+                    "capacity_curve": ((5, 2000), (20, 500)),
+                },
+            )
+
+            catalog = load_catalog(
+                ROOT / "02_processed_data/cranes/crane_configurations.json",
+                user_path,
+            )
+
+            self.assertEqual(catalog[-1].id, added["id"])
+            self.assertEqual(catalog[-1].model, "Manual 10")
+            self.assertIn("USER_INPUT", catalog[-1].source)
+            self.assertEqual(catalog[0].model, "130 EC-B 6")
+
+    def test_edited_user_json_cannot_claim_verified_priority_or_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            user_path = Path(tmp) / "user_cranes.json"
+            add_user_crane(
+                user_path,
+                {
+                    "manufacturer": "Test",
+                    "model": "Tampered",
+                    "jib_length_m": 20,
+                    "max_capacity_kg": 2000,
+                    "max_free_standing_hook_height_m": 30,
+                    "capacity_curve": ((5, 2000), (20, 500)),
+                },
+            )
+            data = json.loads(user_path.read_text(encoding="utf-8"))
+            data["configurations"][0]["priority"] = -100
+            data["configurations"][0]["source"] = "VERIFIED"
+            user_path.write_text(json.dumps(data), encoding="utf-8")
+
+            catalog = load_catalog(
+                ROOT / "02_processed_data/cranes/crane_configurations.json",
+                user_path,
+            )
+
+            self.assertEqual(catalog[-1].model, "Tampered")
+            self.assertGreaterEqual(catalog[-1].priority, 1000)
+            self.assertIn("USER_INPUT", catalog[-1].source)
 
 
 class OptimizerTests(unittest.TestCase):

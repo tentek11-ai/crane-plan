@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from pypdf import PdfReader  # noqa: E402
 from reportlab.lib.pagesizes import A4  # noqa: E402
 from reportlab.pdfgen.canvas import Canvas  # noqa: E402
 from crane_plan.models import JointCranePlan, Load, Placement, ProjectInput, ScenarioResult, SiteInput, WorkPoint  # noqa: E402
-from crane_plan.pdf_workspace import PdfViewportTransform, calibration_m_per_pixel, inspect_pdf, pixel_to_world, render_page, suggest_vector_bounds  # noqa: E402
+from crane_plan.pdf_workspace import PdfViewportTransform, calibration_m_per_pixel, display_size, inspect_pdf, pixel_to_world, render_page, suggest_vector_bounds  # noqa: E402
 from crane_plan.project_io import create_project_folder, load_project, save_project  # noqa: E402
 from crane_plan.report import generate_report  # noqa: E402
 
@@ -28,6 +29,48 @@ def sample_project():
 
 
 class ProjectIOTests(unittest.TestCase):
+    def test_project_json_persists_selected_scenario_and_verification_summaries(self):
+        project = sample_project()
+        scenarios = [{"status": "PASS"}, {"status": "BLOCKED"}]
+        verifications = [
+            {"scenario_index": 0, "status": "VERIFIED", "input_sha256": "a" * 64},
+            {"scenario_index": 1, "status": "REJECTED", "input_sha256": "b" * 64},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(
+                folder,
+                project,
+                scenarios,
+                selected_scenario_index=0,
+                scenario_verifications=verifications,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["scenarios"], scenarios)
+            self.assertEqual(payload["selected_scenario_index"], 0)
+            self.assertEqual(payload["scenario_verifications"], verifications)
+            self.assertEqual(load_project(path).name, project.name)
+
+    def test_load_confirmation_defaults_false_and_round_trips(self):
+        project = sample_project()
+        self.assertFalse(project.loads_verified)
+        project.loads_verified = True
+        self.assertTrue(project.to_dict()["loads_verified"])
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            save_project(folder, project)
+            self.assertTrue(load_project(folder).loads_verified)
+
+    def test_legacy_project_without_load_confirmation_defaults_false(self):
+        project = sample_project()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(folder, project)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("loads_verified", None)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.assertFalse(load_project(path).loads_verified)
+
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = sample_project()
@@ -52,6 +95,21 @@ class ProjectIOTests(unittest.TestCase):
 
 
 class PdfWorkspaceTests(unittest.TestCase):
+    def test_display_size_enlarges_source_above_one_hundred_percent(self):
+        self.assertEqual(display_size((800, 600), 1.5), (1200, 900))
+        self.assertEqual(display_size((801, 601), 0.5), (400, 300))
+
+    def test_display_size_rejects_non_positive_scale(self):
+        with self.assertRaisesRegex(ValueError, "положительным"):
+            display_size((800, 600), 0)
+
+    def test_scrolled_canvas_point_round_trips_through_document_coordinates(self):
+        viewport = PdfViewportTransform(scale=2.5)
+        canvas_point = (760.0, 540.0)
+        document_point = viewport.view_to_document(canvas_point)
+        self.assertEqual(document_point, (304.0, 216.0))
+        self.assertEqual(viewport.document_to_view(document_point), canvas_point)
+
     def test_viewport_zoom_keeps_document_point_under_cursor(self):
         viewport=PdfViewportTransform(scale=1.0,offset_x=15,offset_y=-8)
         cursor=(320,240); before=viewport.view_to_document(cursor)
@@ -89,6 +147,42 @@ class PdfWorkspaceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_unverified_preview_has_not_for_release_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(
+                Path(tmp)/"expert.pdf",
+                project,
+                [scenario],
+                document_status="НЕ ДЛЯ ВЫПУСКА — ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА",
+            )
+            texts=[page.extract_text() or "" for page in PdfReader(path).pages]
+            self.assertTrue(all("НЕ ДЛЯ ВЫПУСКА" in text for text in texts))
+            self.assertTrue(all("ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА" in text for text in texts))
+
+    def test_rejected_preview_has_rejection_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(
+                Path(tmp)/"rejected.pdf",
+                project,
+                [scenario],
+                document_status="НЕ ДЛЯ ВЫПУСКА — ВАРИАНТ ОТКЛОНЁН",
+            )
+            text="\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+            self.assertIn("НЕ ДЛЯ ВЫПУСКА",text)
+            self.assertIn("ВАРИАНТ ОТКЛОНЁН",text)
+
+    def test_verified_report_has_no_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(Path(tmp)/"verified.pdf",project,[scenario])
+            text="\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+            self.assertNotIn("НЕ ДЛЯ ВЫПУСКА",text)
+
     def test_report_is_readable_and_multipage(self):
         project=sample_project()
         scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
