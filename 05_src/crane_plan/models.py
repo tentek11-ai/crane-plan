@@ -101,6 +101,7 @@ class ProjectInput:
     approved_by: str = ""
     schema_version: int = 2
     restricted_zones_confirmed: bool = False
+    loads_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

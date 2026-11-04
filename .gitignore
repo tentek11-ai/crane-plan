@@ -23,6 +23,7 @@ desktop.ini
 work/
 tmp/
 outputs/
+08_dissertation/04_article_1_crane_placement/output/qa/
 
 # Local secrets
 .env

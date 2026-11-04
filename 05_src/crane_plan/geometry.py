@@ -14,6 +14,14 @@ def distance(a: Point, b: Point) -> float:
     return hypot(a[0] - b[0], a[1] - b[1])
 
 
+def section_contour_height(contour: list[Point]) -> float:
+    """Return the vertical extent of a section contour in metres."""
+    if not contour:
+        return 0.0
+    heights = [height for _, height in contour]
+    return max(heights) - min(heights)
+
+
 def point_in_polygon(point: Point, polygon: list[Point], include_boundary: bool = True) -> bool:
     if len(polygon) < 3:
         return False

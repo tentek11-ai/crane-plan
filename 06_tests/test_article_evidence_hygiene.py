@@ -61,9 +61,9 @@ class ArticleEvidenceHygieneTests(unittest.TestCase):
 
     def test_case_manifests_have_fixed_validation_statuses(self):
         expected_statuses = {
-            "PPRK-005": "retrospective",
-            "PPRK-006": "retrospective",
-            "PPRK-007": "independent_pilot_accepted_for_implementation",
+            "PPRK-005": "retrospective_external_reproduction_positive",
+            "PPRK-006": "retrospective_external_reproduction_positive",
+            "PPRK-007": "independent_pilot_expert_confirmed_with_conditions",
         }
         for case_id, expected_status in expected_statuses.items():
             path = ARTICLE_ROOT / "cases" / case_id / "case_manifest.json"
@@ -80,6 +80,14 @@ class ArticleEvidenceHygieneTests(unittest.TestCase):
                 "source_files",
             ):
                 self.assertIn(key, manifest)
+
+    def test_obsolete_implementation_acceptance_status_is_absent(self):
+        obsolete = "independent_pilot_accepted_for_implementation"
+        violations = []
+        for path in public_article_files(ARTICLE_ROOT):
+            if obsolete in path.read_text(encoding="utf-8"):
+                violations.append(str(path.relative_to(ROOT)))
+        self.assertEqual(violations, [])
 
     def test_numeric_source_values_have_units_and_locators(self):
         for case_id in ("PPRK-005", "PPRK-006", "PPRK-007"):
@@ -102,7 +110,7 @@ class ArticleEvidenceHygieneTests(unittest.TestCase):
 
     def test_author_reported_2026_implementation_is_identity_specific(self):
         expected = {
-            "PPRK-005": "Малый Знаменский",
+            "PPRK-005": "Малом Знаменском",
             "PPRK-007": "Новаторов",
         }
         for case_id, address_fragment in expected.items():

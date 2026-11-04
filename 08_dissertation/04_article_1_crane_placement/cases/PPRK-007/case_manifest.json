@@ -1,10 +1,17 @@
 {
   "case_id": "PPRK-007",
   "project_code": "10.04-20/00.000.ППРк",
-  "validation_status": "independent_pilot_accepted_for_implementation",
+  "validation_status": "independent_pilot_expert_confirmed_with_conditions",
   "identity_status": "CONFIRMED_PRIMARY_AND_AUTHOR_ATTESTED",
   "address_publication_status": "street_confirmed_permission_pending",
-  "publication_address": "г. Москва, улица Новаторов",
+  "publication_address": "Строительство неонатального корпуса на 76 коек и консультативно-диагностического центра на 150 посещений в смену на территории филиала ГКБ № 64 (Родильный дом № 4), г. Москва, ЮЗАО, ул. Новаторов, д. 3, стр. 1, 2, 3",
+  "validation": {
+    "method": "independent_calculation_followed_by_expert_assessment",
+    "result": "confirmed_with_conditions",
+    "evidence_status": "AUTHOR_CONFIRMED_WRITTEN_SIGNED_STAMPED",
+    "expert": "Гриценко Виктор Николаевич, инженер высшей категории ООО «КРАН ТЕНТЕК», стаж более 15 лет",
+    "claim_boundary": "Эксперт подтвердил техническую допустимость и организационную предпочтительность однокрановой схемы при выполнении установленных защитных мероприятий; фактическое внедрение программной схемы не заявляется"
+  },
   "implementation": {
     "year": 2026,
     "status": "AUTHOR_REPORTED_PENDING_DOCUMENTARY_CONFIRMATION",

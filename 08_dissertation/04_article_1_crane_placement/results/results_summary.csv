@@ -1,1 +1,8 @@
 case_id,run_id,metric,value,unit,json_locator
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,covered_work_points,16,count,novatorov_v222_result.json:covered_points
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,total_work_points,16,count,novatorov_v222_result.json:total_points
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,accounted_lifts,160,count,novatorov_v222_result.json:accounted_lifts
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,maximum_required_radius,16.8264732191,m,novatorov_v222_result.json:maximum_required_radius_m
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,required_hook_height,37.2,m,novatorov_v222_result.json:required_hook_height_m
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,accepted_crane_height,44.4,m,novatorov_v222_result.json:accepted_crane_height_m
+Неонатальный корпус и КДЦ на ул. Новаторов,novatorov-v222,defined_160_lift_set_duration,1.7738050258,day,novatorov_v222_result.json:defined_lift_set_duration_days

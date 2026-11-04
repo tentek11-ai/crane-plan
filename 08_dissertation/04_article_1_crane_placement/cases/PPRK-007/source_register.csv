@@ -1,4 +1,5 @@
 parameter,value,unit,status,source_hash,locator,public_note
+validation_status,independent_pilot_expert_confirmed_with_conditions,,USER_DEFINED,,author confirmation recorded 2026-10-22,Независимый расчет и последующая письменная экспертная оценка с условиями; фактическое внедрение программной схемы не заявляется
 project_code,10.04-20/00.000.ППРк,,CONFIRMED,,project_summary.md and pprk_registry.csv:PPRK-007,Проектный шифр совпадает
 publication_address,"г. Москва, улица Новаторов",,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,"ППРк(1)/Лист01.pdf; author attestation recorded 2026-10-20",Улица подтверждена; публикация полного адреса ожидает разрешения
 implementation_year,2026,year,USER_DEFINED,ac19eaf0e25464d32e3e253f53397b660149369d6ba13b104b9f39750cf64bc6,author attestation recorded 2026-10-20,Реализация сообщена автором и требует документального подтверждения

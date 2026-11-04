@@ -649,7 +649,46 @@ def _restamp_page_numbers(path: Path) -> None:
     temporary.replace(path)
 
 
-def generate_report(path: str|Path, project: ProjectInput, scenarios: list[ScenarioResult], selected_pages: list[int] | None = None) -> Path:
+def _apply_document_status(path: Path, text: str) -> None:
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(path))
+    writer = PdfWriter()
+    font = _font()
+    for page in reader.pages:
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        packet = io.BytesIO()
+        overlay = Canvas(packet, pagesize=(width, height))
+        overlay.saveState()
+        try:
+            overlay.setFillAlpha(0.2)
+        except AttributeError:
+            pass
+        overlay.setFillColor(RED)
+        overlay.setFont(font, min(23, max(12, width / 45)))
+        overlay.translate(width / 2, height / 2)
+        overlay.rotate(32)
+        overlay.drawCentredString(0, 0, text)
+        overlay.restoreState()
+        overlay.save()
+        packet.seek(0)
+        writer.add_page(page)
+        writer.pages[-1].merge_page(PdfReader(packet).pages[0])
+    temporary = path.with_suffix(".status.pdf")
+    with temporary.open("wb") as stream:
+        writer.write(stream)
+    temporary.replace(path)
+
+
+def generate_report(
+    path: str | Path,
+    project: ProjectInput,
+    scenarios: list[ScenarioResult],
+    selected_pages: list[int] | None = None,
+    *,
+    document_status: str | None = None,
+) -> Path:
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True); font=_font(); styles=getSampleStyleSheet()
     for style in styles.byName.values(): style.fontName=font
     title=ParagraphStyle("PPRKTitle",parent=styles["Title"],fontName=font,fontSize=17,leading=21,textColor=colors.black,alignment=TA_CENTER,spaceAfter=8*mm)
@@ -807,4 +846,6 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         with selected_path.open("wb") as stream: selected_writer.write(stream)
         selected_path.replace(path)
     _restamp_page_numbers(path)
+    if document_status:
+        _apply_document_status(path, document_status)
     return path

@@ -1,10 +1,16 @@
 {
   "case_id": "PPRK-006",
   "project_code": "29.12-19/00.000.ППРк",
-  "validation_status": "retrospective",
+  "validation_status": "retrospective_external_reproduction_positive",
   "identity_status": "CONFIRMED_WITH_PENDING_PRIMARY_LOCATORS",
   "address_publication_status": "pending_permission",
-  "publication_address": "Московская область, г. Люберцы",
+  "publication_address": "Строительство пристройки на 200 мест к зданию МОУ Карцевская школа, Московская область, г. Люберцы, 3-е почтовое отделение, д. 50, вл. 8",
+  "validation": {
+    "method": "retrospective_external_reproduction",
+    "result": "positive",
+    "evidence_status": "AUTHOR_CONFIRMED_HELD_BY_AUTHOR",
+    "claim_boundary": "Сторонний проектировщик самостоятельно запустил переданный ZIP-архив и подтвердил полученное программой решение; файлы запуска и датированная характеристика хранятся у автора и в текущей рабочей среде не инспектировались"
+  },
   "building": {
     "type": "school_extension_200_places",
     "floors": "UNKNOWN",
