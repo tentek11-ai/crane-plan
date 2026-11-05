@@ -40,11 +40,22 @@ from .operations import (
     load_standard_loads,
     validate_operations,
 )
+from .gui_adapter import AdaptedScenarioV21, AdapterIssue, adapt_scenario_v21
+from .integration import (
+    IntegrationStatus,
+    ScenarioVerificationV21,
+    default_release_index,
+    release_blockers,
+    scenario_for_report,
+    verify_scenario_v21,
+    verify_scenarios_v21,
+)
 from .protocol import (
     CalculationProtocolV3,
     build_protocol,
     canonical_json,
     save_protocol,
+    save_protocol_atomic,
     sha256_hex,
 )
 from .service import EngineRequestV21, EngineResultV21, run_engine_v21
@@ -57,6 +68,8 @@ from .verification import (
 
 __all__ = [
     "CapacityPoint",
+    "AdaptedScenarioV21",
+    "AdapterIssue",
     "CalculationProtocolV3",
     "CatalogIssue",
     "ConstructionStage",
@@ -64,6 +77,7 @@ __all__ = [
     "ConstraintCode",
     "CraneConfigurationV3",
     "InputIssue",
+    "IntegrationStatus",
     "LiftEndpoint",
     "LiftingOperation",
     "LoadSpec",
@@ -80,24 +94,32 @@ __all__ = [
     "SiteGeometry",
     "SourceKind",
     "SourceLocator",
+    "ScenarioVerificationV21",
     "StageSolutionV3",
     "VerificationCheck",
     "VerificationReport",
     "VerificationStatus",
     "build_operations",
+    "adapt_scenario_v21",
     "build_protocol",
     "canonical_json",
     "conservative_capacity_kg",
+    "default_release_index",
     "evaluate_operation",
     "evaluate_placement",
     "load_catalog_v3",
     "load_standard_loads",
+    "release_blockers",
     "save_protocol",
+    "save_protocol_atomic",
     "sha256_hex",
     "run_engine_v21",
+    "scenario_for_report",
     "validate_capacity_curve",
     "validate_operations",
     "validate_project",
     "validate_solution_structure",
     "verify_solution",
+    "verify_scenario_v21",
+    "verify_scenarios_v21",
 ]

@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import unittest
@@ -10,9 +11,10 @@ sys.path.insert(0, str(ROOT / "05_src"))
 from pypdf import PdfReader  # noqa: E402
 from reportlab.lib.pagesizes import A4  # noqa: E402
 from reportlab.pdfgen.canvas import Canvas  # noqa: E402
-from crane_plan.models import JointCranePlan, Load, Placement, ProjectInput, ScenarioResult, SiteInput, WorkPoint  # noqa: E402
-from crane_plan.pdf_workspace import PdfViewportTransform, calibration_m_per_pixel, inspect_pdf, pixel_to_world, render_page, suggest_vector_bounds  # noqa: E402
+from crane_plan.models import JointCranePlan, Load, Placement, ProjectInput, ScenarioResult, SiteInput, SOZRPlan, WarningAcceptance, WorkPoint  # noqa: E402
+from crane_plan.pdf_workspace import PdfViewportTransform, calibration_m_per_pixel, display_size, inspect_pdf, pixel_to_world, render_page, suggest_vector_bounds  # noqa: E402
 from crane_plan.project_io import create_project_folder, load_project, save_project  # noqa: E402
+from crane_plan.pprk_models import ApprovalSlot, ExternalDocument, ReleaseStatus, TemplateOverride  # noqa: E402
 from crane_plan.report import generate_report  # noqa: E402
 
 
@@ -28,6 +30,85 @@ def sample_project():
 
 
 class ProjectIOTests(unittest.TestCase):
+    def test_schema_v3_loads_with_safe_default_release_configuration(self):
+        project = sample_project()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(folder, project)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["schema_version"] = 3
+            payload.pop("pprk_release", None)
+            payload["future_project_field"] = "ignored"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            restored = load_project(path)
+
+        self.assertEqual(restored.schema_version, 4)
+        self.assertEqual(restored.pprk_release.status, ReleaseStatus.PRELIMINARY)
+        self.assertEqual(len(restored.pprk_release.approvals), 8)
+
+    def test_schema_v4_persists_full_release_configuration(self):
+        project = sample_project()
+        project.pprk_release.title = "Полный комплект ППРк"
+        project.pprk_release.object_address = "Москва, Тружеников пер."
+        project.pprk_release.approvals = [ApprovalSlot(organization="Заказчик", full_name="Иванов И.И.")]
+        project.pprk_release.external_documents = [
+            ExternalDocument("foundation", "Проект фундамента", required=True, present=False)
+        ]
+        project.pprk_release.overrides = [TemplateOverride("general.p1", "1.0", "Текст пользователя")]
+        project.pprk_release.status = ReleaseStatus.REVIEW
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(folder, project)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            restored = load_project(path)
+
+        self.assertEqual(payload["schema_version"], 4)
+        self.assertEqual(payload["pprk_release"]["status"], "REVIEW")
+        self.assertEqual(restored.pprk_release, project.pprk_release)
+
+    def test_project_json_persists_selected_scenario_and_verification_summaries(self):
+        project = sample_project()
+        scenarios = [{"status": "PASS"}, {"status": "BLOCKED"}]
+        verifications = [
+            {"scenario_index": 0, "status": "VERIFIED", "input_sha256": "a" * 64},
+            {"scenario_index": 1, "status": "REJECTED", "input_sha256": "b" * 64},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(
+                folder,
+                project,
+                scenarios,
+                selected_scenario_index=0,
+                scenario_verifications=verifications,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["scenarios"], scenarios)
+            self.assertEqual(payload["selected_scenario_index"], 0)
+            self.assertEqual(payload["scenario_verifications"], verifications)
+            self.assertEqual(load_project(path).name, project.name)
+
+    def test_load_confirmation_defaults_false_and_round_trips(self):
+        project = sample_project()
+        self.assertFalse(project.loads_verified)
+        project.loads_verified = True
+        self.assertTrue(project.to_dict()["loads_verified"])
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            save_project(folder, project)
+            self.assertTrue(load_project(folder).loads_verified)
+
+    def test_legacy_project_without_load_confirmation_defaults_false(self):
+        project = sample_project()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = create_project_folder(tmp, project)
+            path = save_project(folder, project)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("loads_verified", None)
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            self.assertFalse(load_project(path).loads_verified)
+
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
             project = sample_project()
@@ -52,6 +133,21 @@ class ProjectIOTests(unittest.TestCase):
 
 
 class PdfWorkspaceTests(unittest.TestCase):
+    def test_display_size_enlarges_source_above_one_hundred_percent(self):
+        self.assertEqual(display_size((800, 600), 1.5), (1200, 900))
+        self.assertEqual(display_size((801, 601), 0.5), (400, 300))
+
+    def test_display_size_rejects_non_positive_scale(self):
+        with self.assertRaisesRegex(ValueError, "положительным"):
+            display_size((800, 600), 0)
+
+    def test_scrolled_canvas_point_round_trips_through_document_coordinates(self):
+        viewport = PdfViewportTransform(scale=2.5)
+        canvas_point = (760.0, 540.0)
+        document_point = viewport.view_to_document(canvas_point)
+        self.assertEqual(document_point, (304.0, 216.0))
+        self.assertEqual(viewport.document_to_view(document_point), canvas_point)
+
     def test_viewport_zoom_keeps_document_point_under_cursor(self):
         viewport=PdfViewportTransform(scale=1.0,offset_x=15,offset_y=-8)
         cursor=(320,240); before=viewport.view_to_document(cursor)
@@ -89,6 +185,54 @@ class PdfWorkspaceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_generated_pprk_contains_separate_sozr_sheet_and_warning_comment(self):
+        project=sample_project()
+        project.warning_acceptances=[WarningAcceptance("WARN-1","a"*64,"согласовано с ответственным специалистом")]
+        sozr=SOZRPlan("K1",30,(),(),(),(),"SOZR-1.0",0,0)
+        placement=Placement("c1","130 EC-B 6",0,0,[0],30,50,30,sozr_plan=sozr)
+        scenario=ScenarioResult("PASS",[placement],[],[],routes=[])
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(Path(tmp)/"sozr-report.pdf",project,[scenario])
+            text="\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+        self.assertIn("СОЗР",text)
+        self.assertIn("согласовано с ответственным специалистом",text)
+
+    def test_unverified_preview_has_not_for_release_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(
+                Path(tmp)/"expert.pdf",
+                project,
+                [scenario],
+                document_status="НЕ ДЛЯ ВЫПУСКА — ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА",
+            )
+            texts=[page.extract_text() or "" for page in PdfReader(path).pages]
+            self.assertTrue(all("НЕ ДЛЯ ВЫПУСКА" in text for text in texts))
+            self.assertTrue(all("ТРЕБУЕТСЯ ЭКСПЕРТНАЯ ПРОВЕРКА" in text for text in texts))
+
+    def test_rejected_preview_has_rejection_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(
+                Path(tmp)/"rejected.pdf",
+                project,
+                [scenario],
+                document_status="НЕ ДЛЯ ВЫПУСКА — ВАРИАНТ ОТКЛОНЁН",
+            )
+            text="\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+            self.assertIn("НЕ ДЛЯ ВЫПУСКА",text)
+            self.assertIn("ВАРИАНТ ОТКЛОНЁН",text)
+
+    def test_verified_report_has_no_watermark(self):
+        project=sample_project()
+        scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=generate_report(Path(tmp)/"verified.pdf",project,[scenario])
+            text="\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+            self.assertNotIn("НЕ ДЛЯ ВЫПУСКА",text)
+
     def test_report_is_readable_and_multipage(self):
         project=sample_project()
         scenario=ScenarioResult("PASS",[Placement("c","130 EC-B 6",-20,0,[0],25,55)],[],[],3.5,1)
@@ -140,7 +284,7 @@ class ReportTests(unittest.TestCase):
     def test_joint_crane_sheet_contains_calculated_sectors(self):
         project=sample_project()
         p1=Placement("c1","130 EC-B 6",-25,0,[0],25,55,60,[0,1],58,320,410,345,375)
-        p2=Placement("c2","130 EC-B 6",25,0,[],25,55,60,[2,3],59,130,220,165,195)
+        p2=Placement("c2","130 EC-B 6",25,0,[],25,55,60,[2,3],61,130,220,165,195)
         joint=JointCranePlan(50,5,2,3,2,2,True,2200,[(-10,-20),(10,-20),(10,20),(-10,20)],[],2,2,4,["Этап 1","Этап 2","Этап 3","Этап 4"])
         scenario=ScenarioResult("PASS_WITH_CONDITIONS",[p1,p2],[],[],3.5,1,joint)
         with tempfile.TemporaryDirectory() as tmp:

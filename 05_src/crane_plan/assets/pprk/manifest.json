@@ -1,0 +1,110 @@
+[
+  {
+    "asset_id": "slinging",
+    "title": "Схемы строповки",
+    "category": "slinging",
+    "file_name": "slinging.png",
+    "source_page": 56,
+    "crop_box": [
+      106,
+      47,
+      1684,
+      1662
+    ],
+    "sha256": "1f4690b5bf2ef169c9f5227e6048105c48dd065650969d25ebb6b4330ec16009",
+    "pixel_width": 6575,
+    "pixel_height": 6729,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  },
+  {
+    "asset_id": "fencing",
+    "title": "Инвентарные ограждения опасных зон",
+    "category": "fencing",
+    "file_name": "fencing.png",
+    "source_page": 57,
+    "crop_box": [
+      55,
+      100,
+      540,
+      765
+    ],
+    "sha256": "1cc4be145b2d5755e8988fc3173d4dd88ee37a709d9f52a607c44e7c7d94a860",
+    "pixel_width": 2020,
+    "pixel_height": 2770,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  },
+  {
+    "asset_id": "safety_signs",
+    "title": "Знаки безопасности",
+    "category": "safety_signs",
+    "file_name": "safety_signs.png",
+    "source_page": 58,
+    "crop_box": [
+      55,
+      72,
+      540,
+      795
+    ],
+    "sha256": "c88d9f3af2fdc37a4f4f78ed680c4e533e356a9c9830bb20611e2a1e06b7885a",
+    "pixel_width": 2020,
+    "pixel_height": 3012,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  },
+  {
+    "asset_id": "hand_signals",
+    "title": "Знаковая сигнализация при перемещении грузов",
+    "category": "hand_signals",
+    "file_name": "hand_signals.png",
+    "source_page": 60,
+    "crop_box": [
+      54,
+      78,
+      543,
+      803
+    ],
+    "sha256": "3f52c6b2be5541aac15a3c9e3d5d6c8b53141245b7af5e708c9af307bd43383e",
+    "pixel_width": 2037,
+    "pixel_height": 3020,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  },
+  {
+    "asset_id": "storage",
+    "title": "Складирование арматуры",
+    "category": "storage",
+    "file_name": "storage.png",
+    "source_page": 63,
+    "crop_box": [
+      115,
+      103,
+      523,
+      744
+    ],
+    "sha256": "5849dd82537a609dcb9efd60f1937c6ab74aa2628f19a7f1ab86d538eb0da975",
+    "pixel_width": 1700,
+    "pixel_height": 2670,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  },
+  {
+    "asset_id": "protective_screens",
+    "title": "Защитный экран на консоли",
+    "category": "protective_screens",
+    "file_name": "protective_screens.png",
+    "source_page": 66,
+    "crop_box": [
+      55,
+      72,
+      541,
+      780
+    ],
+    "sha256": "39b953ff42bb2d6ebe28d4956e01d256908a44ebcf1962c11beeefbec3f74877",
+    "pixel_width": 2025,
+    "pixel_height": 2950,
+    "source_kind": "reference_clip",
+    "quality_status": "verified"
+  }
+]
