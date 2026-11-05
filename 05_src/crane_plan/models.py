@@ -410,4 +410,3 @@ class ScenarioResult:
 
     def to_dict(self) -> dict[str, Any]:
         return _plain_value(asdict(self))
-

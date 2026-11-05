@@ -1288,4 +1288,3 @@ def _generate_report(
     if document_status:
         _apply_document_status(path, document_status)
     return path
-

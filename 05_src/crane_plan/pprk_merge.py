@@ -412,4 +412,3 @@ def assemble_pprk_report(output, project, bundle, render_main, *, document_statu
         except OSError as error:
             _fail("PPRK_EXTERNAL_WRITE_FAILED", f"Не удалось опубликовать итоговый ППРк: {error}")
         return replace(result, output_pdf=output)
-

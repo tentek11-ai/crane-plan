@@ -307,4 +307,3 @@ class ReleaseReviewRegressions(unittest.TestCase):
         ui._collect_loads.return_value.append(project.loads[0])
         snapshot = CranePlanApp._project(ui, require_geometry=False)
         self.assertEqual(snapshot.work_points[0].load_index, 0)
-

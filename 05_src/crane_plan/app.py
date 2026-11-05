@@ -2616,4 +2616,3 @@ class CranePlanApp(tk.Tk):
 
 def run():
     CranePlanApp().mainloop()
-

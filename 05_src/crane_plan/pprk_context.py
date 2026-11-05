@@ -747,4 +747,3 @@ def build_pprk_context(
         tuple(active_payload),
         verification.scenario_index,
     )
-

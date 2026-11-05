@@ -145,4 +145,3 @@ def validate_asset_library(root: Path) -> list[AssetIssue]:
         except (OSError, ValueError, Image.DecompressionBombError) as exc:
             issue("unreadable_image", str(exc))
     return issues
-

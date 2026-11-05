@@ -286,4 +286,3 @@ def render_template_text(
         inclusion_condition=section.inclusion_condition,
         normative_keys=section.normative_keys,
     )
-

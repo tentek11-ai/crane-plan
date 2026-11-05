@@ -391,4 +391,3 @@ def candidate_grid(boundary: list[Point], step_m: float = 2.0, max_points: int =
             x += step_m
         y += step_m
     return result
-

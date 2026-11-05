@@ -856,4 +856,3 @@ if __name__ == "__main__":
         print(json.dumps(check_portable_release(sys.argv[2]), ensure_ascii=False))
     else:
         unittest.main()
-

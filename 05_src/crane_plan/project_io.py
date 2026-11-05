@@ -140,4 +140,3 @@ def load_project(path: str | Path) -> ProjectInput:
     if "section_building_contour" in fields:
         fields["section_building_contour"] = [tuple(point) for point in fields["section_building_contour"]]
     return ProjectInput(**fields)
-

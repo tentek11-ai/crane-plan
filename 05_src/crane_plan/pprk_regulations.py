@@ -64,4 +64,3 @@ def load_release_regulations(path=None):
     if not records:
         raise ValueError("Пустой нормативный реестр")
     return tuple(records)
-

@@ -54,4 +54,3 @@ Rechecked the composer matrix, asset bytes, selected index and binding, prefligh
 - Appendix status resolution is shared by the view and physical expansion. An unsupported sling requires an explicitly preliminary edition. The requested REVIEW carries a blocking appendix issue and shows PRELIMINARY as effective. The reopened preliminary PDF title agrees with the view and has no REVIEW legend.
 - GREEN for the same six regressions: 6 tests in 2.427 s, OK. Focused command `python -m unittest test_app_pprk_release test_app_engine_integration test_pprk_models test_io_pdf_report test_pprk_appendices test_pprk_merge test_pprk_composer test_pprk_text_report`: 126 tests in 58.167 s, OK. Bundled runtime, worktree TEMP/TMP and PYTHONPATH as above. Compileall and diff check passed.
 - Full command `python -m unittest discover -s 06_tests`: 411 tests in 138.692 s, OK.
-

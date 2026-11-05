@@ -363,4 +363,3 @@ def publish_release(output, release, fingerprint, current_fingerprint, *, render
                     backup.replace(target)
             raise
     return output
-

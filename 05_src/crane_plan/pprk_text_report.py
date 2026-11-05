@@ -583,4 +583,3 @@ def render_pprk_text_report(
         note_path.unlink(missing_ok=True)
     return path
 
-

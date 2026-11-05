@@ -297,4 +297,3 @@ unrelated engine evidence, all assigned operations must match, old input traces
 lose verified status on mismatch, footer bounds avoid all canonical rectangles,
 and existing legacy report/status APIs stay compatible. No new scheme names,
 source assets, project persistence changes or approval behavior were added.
-

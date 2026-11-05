@@ -247,4 +247,3 @@ def draw_asset_appendix(canvas, appendix: AssetAppendix, assets) -> AppendixRend
     canvas.drawRightString(width - 15 * mm, 10 * mm, f"ППРк / стр. {appendix.page_number or '—'}")
     canvas.showPage()
     return AppendixRenderResult(appendix.sheet_id, page_size, image_box, appendix.asset_id, record.sha256 if record else "", appendix.issues)
-

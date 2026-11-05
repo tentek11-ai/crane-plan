@@ -536,4 +536,3 @@ def plan_lift_route(
         input_sha256=_input_hash(project, source, destination, settings, other_cranes),
     )
     return RoutePlanResult(route, [])
-

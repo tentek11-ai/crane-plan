@@ -295,4 +295,3 @@ The coordinator explicitly stopped only the redundant focused R6–R11 process f
 Final verification: targeted core **6/6 / 25.025 s / OK**, exit 0; entirely fresh full **525/525 / 2494.732 s / OK**, exit 0 (`tmp/hardening-r11-full-final.log`), no failures/errors/skips. Full was never interrupted/restarted/superseded and ran alone after the explicit focused stop; all six R11 methods pass inside full. The partial focused is not a completed suite. Final compileall and unstaged/staged diff checks exit 0 (`tmp/hardening-r11-compile-final.log`). All final artifacts/checks use the frozen production source; no further behavior/grammar expansion.
 
 Report records root cause, shared role predicate, class-based self-review, exact commands and status matrix. No spawn/merge/push/publication; parent owns independent integration re-review.
-

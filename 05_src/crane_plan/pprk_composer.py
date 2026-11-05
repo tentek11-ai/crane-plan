@@ -832,4 +832,3 @@ def compose_pprk(
                             role_names["CHECKER"], role_names["APPROVER"], config.issue_date),
         (*mandatory, *(("tie_in_project",) if tie_levels else ())),
     )
-

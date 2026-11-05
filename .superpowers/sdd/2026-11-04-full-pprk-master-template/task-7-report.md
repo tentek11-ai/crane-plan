@@ -261,4 +261,3 @@ in 80.523 s. Full discovery used the README's worktree-local `05_src` in
 `test_admissible_area` and `test_admissible_area_study`. Both modules passed
 on the configured run. The 180 dpi footer crops confirmed legibility in
 both requested cases. Compileall and whitespace checks passed.
-

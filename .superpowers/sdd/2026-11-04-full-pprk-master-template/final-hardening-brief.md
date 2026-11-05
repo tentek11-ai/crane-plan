@@ -23,4 +23,3 @@ Verification:
 - rebuild portable ZIP from final code/docs and smoke-test with its own runtime;
 - update user documentation/report/ledger and record artifact SHA-256;
 - one implementation commit; no merge/push/publish.
-

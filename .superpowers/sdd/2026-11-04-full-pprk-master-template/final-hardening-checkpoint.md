@@ -43,4 +43,3 @@ User again explicitly requested a pause before shutting down the laptop.
 - independent round-8 re-review, final whole-branch review, merge, push and publication remain pending.
 
 Resumed after explicit `ГО` from clean checkpoint `99e961effb9f1a04d1146df295866d7915e607cf`. The completely fresh full suite passed **507/507 / 2875.072 s / OK**, exit 0, with worktree `TEMP`/`TMP` (`tmp/hardening-r8-full-resumed-final.log`). Post-resume compileall and staged/unstaged diff checks passed. Focused **114/114** and the previously verified PDF/cards/ZIP remain valid because production/test/README/guide payload did not change after the checkpoint. A new completion commit is added above the WIP checkpoint; it is not rewritten. The existing ZIP is retained, with fresh post-commit runtime/hash/payload confirmation reported in the handoff. Independent scoped/whole-branch re-review remains with the parent; no merge, push or publication is performed here.
-

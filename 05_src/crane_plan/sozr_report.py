@@ -161,4 +161,3 @@ def draw_sozr_sheet(
     canvas.setStrokeColor(colors.black); canvas.rect(15*mm,5*mm,width-20*mm,height-10*mm)
     canvas.setFillColor(colors.black); canvas.setFont(font,6); canvas.drawRightString(width-18*mm,10*mm,f"Лист {sheet_number}; {project.project_code or 'шифр не задан'}")
     canvas.restoreState(); canvas.showPage()
-

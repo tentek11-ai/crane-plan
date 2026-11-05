@@ -717,4 +717,3 @@ def _draw_calculated_sheet_content(
         _draw_load_schedule(canvas, sheet, context)
     else:
         raise ValueError(f"Неизвестный тип расчётного листа: {sheet.render_kind}")
-

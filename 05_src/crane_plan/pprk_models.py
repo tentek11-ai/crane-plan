@@ -474,4 +474,3 @@ class PPRKReleaseConfig:
             if key in fields:
                 fields[key] = [str(item) for item in fields[key]] if isinstance(fields[key], list) else []
         return cls(**fields)
-

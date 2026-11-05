@@ -199,4 +199,3 @@ def _validate_metadata_graph(root):
 def validate_pdf_metadata(reader):
     validate_release_inputs(dict(reader.metadata or {}))
     _validate_metadata_graph(reader.trailer)
-

@@ -601,4 +601,3 @@ git diff --cached --check
 ```
 
 No spawn, merge, push or publication; parent owns independent integration re-review.
-
