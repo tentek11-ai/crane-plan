@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import hypot, isfinite
+from math import atan2, degrees, hypot, isfinite, sqrt
 
 from .models import Point
 
@@ -10,8 +10,26 @@ from .models import Point
 EPS = 1e-9
 
 
+def normalize_angular_sector(start: float, end: float) -> tuple[float, float, float]:
+    """Shared planner/drawing convention: only positive full turns mean 360°.
+
+    A reverse whole turn (360→0) is a single bearing, while e.g. 400→30
+    is the positive sweep from 40° to 30° (350°), not a full circle.
+    """
+    sweep = 360.0 if end - start >= 360.0 - EPS else (end % 360.0 - start % 360.0) % 360.0
+    return start % 360.0, end % 360.0, sweep
+
+
 def distance(a: Point, b: Point) -> float:
     return hypot(a[0] - b[0], a[1] - b[1])
+
+
+def section_contour_height(contour: list[Point]) -> float:
+    """Return the vertical extent of a section contour in metres."""
+    if not contour:
+        return 0.0
+    heights = [height for _, height in contour]
+    return max(heights) - min(heights)
 
 
 def point_in_polygon(point: Point, polygon: list[Point], include_boundary: bool = True) -> bool:
@@ -37,6 +55,18 @@ def distance_point_to_segment(p: Point, a: Point, b: Point) -> float:
         return distance(p, a)
     t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length_sq))
     return distance(p, (a[0] + t * dx, a[1] + t * dy))
+
+
+def distance_segment_to_segment(a: Point, b: Point, c: Point, d: Point) -> float:
+    """Exact minimum distance between two closed 2D segments."""
+    if segments_intersect(a, b, c, d):
+        return 0.0
+    return min(
+        distance_point_to_segment(a, c, d),
+        distance_point_to_segment(b, c, d),
+        distance_point_to_segment(c, a, b),
+        distance_point_to_segment(d, a, b),
+    )
 
 
 def distance_to_polygon(point: Point, polygon: list[Point]) -> float:
@@ -89,6 +119,203 @@ def segment_intersects_polygon(a: Point, b: Point, polygon: list[Point], include
     if include_endpoints and (point_in_polygon(a, polygon) or point_in_polygon(b, polygon)):
         return True
     return any(segments_intersect(a, b, polygon[i], polygon[(i + 1) % len(polygon)]) for i in range(len(polygon)))
+
+
+def segment_intersects_polygon_exact(
+    a: Point,
+    b: Point,
+    polygon: list[Point],
+    boundary_is_collision: bool = True,
+) -> bool:
+    """Return whether a complete segment enters a polygon.
+
+    When boundary contact is allowed, collinear/tangent contact is ignored but a
+    proper crossing into the interior remains a collision.
+    """
+    if point_in_polygon(a, polygon, include_boundary=boundary_is_collision):
+        return True
+    if point_in_polygon(b, polygon, include_boundary=boundary_is_collision):
+        return True
+    if boundary_is_collision:
+        return any(
+            segments_intersect(a, b, polygon[index], polygon[(index + 1) % len(polygon)])
+            for index in range(len(polygon))
+        )
+
+    def orient(p: Point, q: Point, r: Point) -> float:
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    for index in range(len(polygon)):
+        c, d = polygon[index], polygon[(index + 1) % len(polygon)]
+        o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+        if o1 * o2 < -EPS and o3 * o4 < -EPS:
+            return True
+    midpoint = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    return point_in_polygon(midpoint, polygon, include_boundary=False)
+
+
+def segment_circle_intersections(a: Point, b: Point, center: Point, radius: float) -> list[Point]:
+    if radius < 0:
+        raise ValueError("Радиус не может быть отрицательным")
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    fx, fy = a[0] - center[0], a[1] - center[1]
+    coefficient = dx * dx + dy * dy
+    if coefficient <= EPS:
+        return [a] if abs(distance(a, center) - radius) <= EPS else []
+    linear = 2.0 * (fx * dx + fy * dy)
+    constant = fx * fx + fy * fy - radius * radius
+    discriminant = linear * linear - 4.0 * coefficient * constant
+    if discriminant < -EPS:
+        return []
+    roots = [-linear / (2.0 * coefficient)] if abs(discriminant) <= EPS else [
+        (-linear - sqrt(max(0.0, discriminant))) / (2.0 * coefficient),
+        (-linear + sqrt(max(0.0, discriminant))) / (2.0 * coefficient),
+    ]
+    result: list[Point] = []
+    for ratio in sorted(roots):
+        if -EPS <= ratio <= 1.0 + EPS:
+            point = (a[0] + ratio * dx, a[1] + ratio * dy)
+            normalized = (round(point[0], 12), round(point[1], 12))
+            if normalized not in result:
+                result.append(normalized)
+    return result
+
+
+def _angle_on_arc(angle: float, start: float, end: float, clockwise: bool) -> bool:
+    angle, start, end = angle % 360.0, start % 360.0, end % 360.0
+    if clockwise:
+        return (start - angle) % 360.0 <= (start - end) % 360.0 + EPS
+    return (angle - start) % 360.0 <= (end - start) % 360.0 + EPS
+
+
+def arc_intersects_polygon_exact(
+    center: Point,
+    radius: float,
+    start_deg: float,
+    end_deg: float,
+    clockwise: bool,
+    polygon: list[Point],
+    boundary_is_collision: bool = True,
+) -> bool:
+    if radius < 0:
+        raise ValueError("Радиус не может быть отрицательным")
+    start_radians = start_deg * 3.141592653589793 / 180.0
+    end_radians = end_deg * 3.141592653589793 / 180.0
+    from math import cos, sin
+
+    start_point = (center[0] + radius * cos(start_radians), center[1] + radius * sin(start_radians))
+    end_point = (center[0] + radius * cos(end_radians), center[1] + radius * sin(end_radians))
+    if point_in_polygon(start_point, polygon, include_boundary=boundary_is_collision):
+        return True
+    if point_in_polygon(end_point, polygon, include_boundary=boundary_is_collision):
+        return True
+    for index in range(len(polygon)):
+        a, b = polygon[index], polygon[(index + 1) % len(polygon)]
+        for point in segment_circle_intersections(a, b, center, radius):
+            angle = degrees(atan2(point[1] - center[1], point[0] - center[0])) % 360.0
+            if _angle_on_arc(angle, start_deg, end_deg, clockwise):
+                return True
+    return False
+
+
+def distance_arc_to_segment(
+    center: Point,
+    radius: float,
+    start_deg: float,
+    end_deg: float,
+    clockwise: bool,
+    a: Point,
+    b: Point,
+) -> float:
+    """Exact minimum distance between a circular arc and a segment."""
+    from math import cos, radians, sin
+
+    for point in segment_circle_intersections(a, b, center, radius):
+        angle = degrees(atan2(point[1] - center[1], point[0] - center[0])) % 360.0
+        if _angle_on_arc(angle, start_deg, end_deg, clockwise):
+            return 0.0
+    candidates: list[float] = []
+    for angle in (start_deg, end_deg):
+        value = radians(angle)
+        arc_point = (center[0] + radius * cos(value), center[1] + radius * sin(value))
+        candidates.append(distance_point_to_segment(arc_point, a, b))
+    for point in (a, b):
+        radial = distance(center, point)
+        if radial > EPS:
+            angle = degrees(atan2(point[1] - center[1], point[0] - center[0])) % 360.0
+            if _angle_on_arc(angle, start_deg, end_deg, clockwise):
+                candidates.append(abs(radial - radius))
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq > EPS:
+        ratio = ((center[0] - a[0]) * dx + (center[1] - a[1]) * dy) / length_sq
+        if -EPS <= ratio <= 1.0 + EPS:
+            closest = (a[0] + max(0.0, min(1.0, ratio)) * dx, a[1] + max(0.0, min(1.0, ratio)) * dy)
+            radial = distance(center, closest)
+            if radial > EPS:
+                angle = degrees(atan2(closest[1] - center[1], closest[0] - center[0])) % 360.0
+                if _angle_on_arc(angle, start_deg, end_deg, clockwise):
+                    candidates.append(abs(radial - radius))
+    return min(candidates)
+
+
+def segment_inside_polygon_with_clearance(a: Point, b: Point, polygon: list[Point], clearance: float) -> bool:
+    if not point_in_polygon(a, polygon, include_boundary=False) or not point_in_polygon(b, polygon, include_boundary=False):
+        return False
+    edges = [(polygon[index], polygon[(index + 1) % len(polygon)]) for index in range(len(polygon))]
+    return all(distance_segment_to_segment(a, b, start, end) + EPS >= clearance for start, end in edges)
+
+
+def arc_inside_polygon_with_clearance(
+    center: Point,
+    radius: float,
+    start_deg: float,
+    end_deg: float,
+    clockwise: bool,
+    polygon: list[Point],
+    clearance: float,
+) -> bool:
+    from math import cos, radians, sin
+
+    span = (start_deg - end_deg) % 360.0 if clockwise else (end_deg - start_deg) % 360.0
+    middle = (start_deg - span / 2.0) % 360.0 if clockwise else (start_deg + span / 2.0) % 360.0
+    for angle in (start_deg, middle, end_deg):
+        value = radians(angle)
+        point = (center[0] + radius * cos(value), center[1] + radius * sin(value))
+        if not point_in_polygon(point, polygon, include_boundary=False):
+            return False
+    return all(
+        distance_arc_to_segment(center, radius, start_deg, end_deg, clockwise, polygon[index], polygon[(index + 1) % len(polygon)]) + EPS >= clearance
+        for index in range(len(polygon))
+    )
+
+
+def sector_intersects_polygon_exact(
+    center: Point,
+    radius: float,
+    start_deg: float,
+    end_deg: float,
+    clockwise: bool,
+    polygon: list[Point],
+) -> bool:
+    """Check the closed area swept by a radial boom during rotation."""
+    from math import cos, radians, sin
+
+    start_angle, end_angle = radians(start_deg), radians(end_deg)
+    start_tip = (center[0] + radius * cos(start_angle), center[1] + radius * sin(start_angle))
+    end_tip = (center[0] + radius * cos(end_angle), center[1] + radius * sin(end_angle))
+    if segment_intersects_polygon_exact(center, start_tip, polygon):
+        return True
+    if segment_intersects_polygon_exact(center, end_tip, polygon):
+        return True
+    if arc_intersects_polygon_exact(center, radius, start_deg, end_deg, clockwise, polygon):
+        return True
+    for point in polygon:
+        if distance(center, point) <= radius + EPS:
+            angle = degrees(atan2(point[1] - center[1], point[0] - center[0])) % 360.0
+            if _angle_on_arc(angle, start_deg, end_deg, clockwise):
+                return True
+    return False
 
 
 def validate_polygon(polygon: list[Point], name: str) -> list[str]:

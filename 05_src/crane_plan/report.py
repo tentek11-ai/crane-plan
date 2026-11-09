@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass
+from functools import partial
+from operator import methodcaller
 from datetime import datetime
 from html import escape
 from math import atan2, cos, hypot, pi, radians, sin
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Callable
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A3, A4, landscape
@@ -14,14 +19,19 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
+from reportlab.pdfgen.pathobject import PDFPathObject
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-from reportlab.lib.utils import ImageReader
+from reportlab.lib.utils import ImageReader, simpleSplit
 
-from .geometry import distance_to_polygon, offset_polygon, polygon_bounds, polygon_centroid
+from .geometry import distance_to_polygon, offset_polygon, polygon_bounds, polygon_centroid, normalize_angular_sector
 from .models import ProjectInput, ScenarioResult
 from .normative import NormativeInputError, danger_zone_offset_from_outer_edge
 from .pdf_workspace import render_page
+from .sozr_report import build_route_explanation, draw_sozr_sheet
 from .tieins import horizontal_intersections
+
+if TYPE_CHECKING:
+    from .pprk_composer import PPRKBundle
 
 NAVY = colors.HexColor("#17365D")
 RED = colors.HexColor("#C00000")
@@ -67,8 +77,12 @@ def _table(rows, font, widths=None, size=8, header=True):
     return table
 
 
+def _stamp_left(page_width):
+    return page_width - 190 * mm
+
+
 def _project_stamp(canvas, project: ProjectInput, sheet_title: str, sheet_number: str = ""):
-    font=_font(); width,_=canvas._pagesize; x=width-190*mm; y=5*mm; w=185*mm; h=40*mm
+    font=_font(); width,_=canvas._pagesize; x=_stamp_left(width); y=5*mm; w=185*mm; h=40*mm
     canvas.setStrokeColor(colors.black); canvas.setLineWidth(.5)
     # Низ и правая сторона совпадают с рамкой листа: отдельной пересекающей рамки нет.
     canvas.line(x,y,x,y+h); canvas.line(x,y+h,x+w,y+h)
@@ -89,9 +103,20 @@ def _project_stamp(canvas, project: ProjectInput, sheet_title: str, sheet_number
     canvas.drawString(x+34*mm,y+2.5*mm,f"Утв. {(project.approved_by or '__________')[:20]}")
 
 
+SHEET_FRAME_LINE_WIDTH = 0.7
+
+
+def _sheet_frame_rect(width, height):
+    return 20 * mm, 5 * mm, width - 25 * mm, height - 10 * mm
+
+
+def _sheet_border(canvas):
+    width,height=canvas._pagesize; canvas.setStrokeColor(colors.black); canvas.setLineWidth(SHEET_FRAME_LINE_WIDTH)
+    canvas.rect(*_sheet_frame_rect(width, height))
+
+
 def _sheet_frame(canvas, project: ProjectInput, sheet_title: str, sheet_number: str = ""):
-    width,height=canvas._pagesize; canvas.setStrokeColor(colors.black); canvas.setLineWidth(.7)
-    canvas.rect(20*mm,5*mm,width-25*mm,height-10*mm)
+    _sheet_border(canvas)
     _project_stamp(canvas,project,sheet_title,sheet_number)
 
 
@@ -146,23 +171,25 @@ def _draw_sector_overlay(canvas, center, radius, placement, color, exclusion_inn
     """Разрешённый сектор, запретная дуга и блокировка подхода к соседней башне."""
     if placement.allowed_sector_start_deg is None or placement.allowed_sector_end_deg is None:
         return
-    x,y=center; start=placement.allowed_sector_start_deg; end=placement.allowed_sector_end_deg
-    extent=max(0.0,min(360.0,end-start))
+    x,y=center
+    start,end,extent=normalize_angular_sector(placement.allowed_sector_start_deg,placement.allowed_sector_end_deg)
     canvas.setStrokeColor(color); canvas.setLineWidth(2.2); canvas.setDash()
-    canvas.arc(x-radius,y-radius,x+radius,y+radius,startAng=start,extent=extent)
+    if extent:
+        canvas.arc(x-radius,y-radius,x+radius,y+radius,startAng=start,extent=extent)
     for angle in (start,end):
         rad=angle*pi/180; canvas.line(x,y,x+radius*cos(rad),y+radius*sin(rad))
-    if extent<359.5:
+    if extent<360.0:
         canvas.setStrokeColor(RED); canvas.setLineWidth(1.5); canvas.setDash(4,2)
         canvas.arc(x-radius,y-radius,x+radius,y+radius,startAng=end,extent=360-extent)
         canvas.setDash()
     if placement.tower_exclusion_start_deg is not None and placement.tower_exclusion_end_deg is not None:
-        ex_start=placement.tower_exclusion_start_deg; ex_end=placement.tower_exclusion_end_deg
+        ex_start,ex_end,ex_extent=normalize_angular_sector(placement.tower_exclusion_start_deg,placement.tower_exclusion_end_deg)
         canvas.setStrokeColor(RED); canvas.setFillColor(colors.HexColor("#F8CECC")); canvas.setLineWidth(1.2); canvas.setDash(3,2)
         for angle in (ex_start,ex_end):
             rad=angle*pi/180; canvas.line(x+exclusion_inner_radius*cos(rad),y+exclusion_inner_radius*sin(rad),x+radius*cos(rad),y+radius*sin(rad))
-        canvas.arc(x-exclusion_inner_radius,y-exclusion_inner_radius,x+exclusion_inner_radius,y+exclusion_inner_radius,startAng=ex_start,extent=ex_end-ex_start)
-        canvas.arc(x-radius,y-radius,x+radius,y+radius,startAng=ex_start,extent=ex_end-ex_start)
+        if ex_extent:
+            canvas.arc(x-exclusion_inner_radius,y-exclusion_inner_radius,x+exclusion_inner_radius,y+exclusion_inner_radius,startAng=ex_start,extent=ex_extent)
+            canvas.arc(x-radius,y-radius,x+radius,y+radius,startAng=ex_start,extent=ex_extent)
         canvas.setDash()
 
 
@@ -220,9 +247,21 @@ def _merge_vector_background(overlay_page, source: Path, left: float, bottom: fl
     return result
 
 
-def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, number: int, draw_source: bool = True) -> None:
-    font=_font(); width,height=landscape(A4); canvas.saveState(); canvas.setFont(font,14); canvas.setFillColor(NAVY)
-    canvas.drawString(22*mm,height-13*mm,f"СТРОЙГЕНПЛАН. Вариант {number}: расположение башенных кранов")
+def _plan_page(
+    canvas: Canvas,
+    project: ProjectInput,
+    scenario: ScenarioResult,
+    number: int | str,
+    draw_source: bool = True,
+    stage_label: str = "",
+    *,
+    verified_danger_zone_offset_m: float | None = None,
+    require_verified_danger_zone: bool = False,
+) -> None:
+    font=_font(); width,height=canvas._pagesize; canvas.saveState(); canvas.setFont(font,14); canvas.setFillColor(NAVY)
+    stage_suffix=f". {stage_label}" if stage_label else ""
+    identity = f"Лист {number}" if str(number).startswith("ГЧ-") else f"Вариант {number}"
+    canvas.drawString(22*mm,height-13*mm,f"СТРОЙГЕНПЛАН. {identity}: расположение башенных кранов{stage_suffix}")
     left,bottom=22*mm,48*mm; draw_w,draw_h=width-29*mm,height-68*mm; transform=None
     source=Path(project.source_plan_pdf) if project.source_plan_pdf else None
     if source and source.exists() and project.plan_m_per_pixel>0:
@@ -235,9 +274,10 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
             py=project.plan_origin_y_px-point[1]/project.plan_m_per_pixel
             return left+px*scale,bottom+(shown_h/scale-py)*scale
     else:
-        polygons=[project.site.boundary,project.site.building]+project.site.restricted_zones
-        min_x=min(polygon_bounds(p)[0] for p in polygons if p); min_y=min(polygon_bounds(p)[1] for p in polygons if p)
-        max_x=max(polygon_bounds(p)[2] for p in polygons if p); max_y=max(polygon_bounds(p)[3] for p in polygons if p)
+        # Use the same exact envelope as the format planner: crane radii and
+        # remote СОЗР/route geometry must not be clipped outside the site.
+        from .pprk_sheets import calculated_plan_world_bounds
+        min_x,min_y,max_x,max_y=calculated_plan_world_bounds(project,scenario,verified_danger_zone_offset_m)
         scale=min(draw_w/max(1,max_x-min_x),draw_h/max(1,max_y-min_y))
         transform=lambda p:(left+(p[0]-min_x)*scale,bottom+(p[1]-min_y)*scale)
     _draw_polygon(canvas,project.site.boundary,transform,colors.black)
@@ -245,13 +285,25 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
     for zone in project.site.restricted_zones: _draw_polygon(canvas,zone,transform,RED,colors.HexColor("#FADBD8"),1.5)
     _draw_polygon(canvas,project.site.unloading_zone,transform,colors.HexColor("#E67E00"),colors.HexColor("#FDEBD0"),1.5)
     for zone in project.site.storage_zones: _draw_polygon(canvas,zone,transform,colors.HexColor("#7A1FA2"),colors.HexColor("#E8DAEF"),1.5)
-    try:
-        offsets=[danger_zone_offset_from_outer_edge(wp.level_m,project.loads[wp.load_index].largest_dimension_m) for wp in project.work_points if 0<=wp.load_index<len(project.loads)]
-        if offsets:
-            canvas.setDash(5,3); _draw_polygon(canvas,offset_polygon(project.site.building,max(offsets)),transform,colors.HexColor("#D00000"),None,1.0); canvas.setDash()
-    except NormativeInputError:
-        pass
-    for index,wp in enumerate(project.work_points,1):
+    danger_offset = verified_danger_zone_offset_m
+    if require_verified_danger_zone and danger_offset is None and project.work_points:
+        raise ValueError("Для графического листа отсутствует подтверждённый вылет опасной зоны")
+    if danger_offset is None and not require_verified_danger_zone:
+        try:
+            offsets=[danger_zone_offset_from_outer_edge(wp.level_m,project.loads[wp.load_index].largest_dimension_m) for wp in project.work_points if 0<=wp.load_index<len(project.loads)]
+            danger_offset=max(offsets) if offsets else None
+        except NormativeInputError:
+            danger_offset=None
+    if danger_offset is not None:
+        canvas.setDash(5,3); _draw_polygon(canvas,offset_polygon(project.site.building,danger_offset),transform,colors.HexColor("#D00000"),None,1.0); canvas.setDash()
+    visible_work_points = [
+        (index, wp)
+        for index, wp in enumerate(project.work_points, 1)
+        if not stage_label
+        or ("ВЫШЕ" in stage_label and wp.level_m > 0)
+        or ("НИЖЕ" in stage_label and wp.level_m <= 0)
+    ]
+    for index,wp in visible_work_points:
         x,y=transform(wp.point); canvas.setFillColor(colors.HexColor("#009E73")); canvas.rect(x-1.5*mm,y-1.5*mm,3*mm,3*mm,stroke=0,fill=1)
         canvas.setFont(font,7); canvas.drawString(x+2*mm,y+2*mm,f"ТПГ-{index}")
     crane_colors=[colors.HexColor("#004C99"),colors.HexColor("#C05000")]
@@ -280,35 +332,184 @@ def _plan_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, 
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
     canvas.drawString(22*mm,52*mm,"Синий - здание; красный - запрет/опасная огибающая; оранжевый - разгрузка; фиолетовый - склад; ТПГ - точка подачи груза.")
     canvas.drawString(22*mm,48.5*mm,"Толстая дуга - разрешённый сектор; красная штриховая дуга - блокировка; розовая линза - зона взаимного доступа кранов.")
+    if danger_offset is not None:
+        canvas.drawString(22*mm,55.5*mm,f"Подтверждённый вылет опасной зоны от контура здания: {danger_offset:.2f} м.")
     canvas.drawRightString(width-7*mm,48.5*mm,"Эскиз спроецирован на загруженный план PDF")
     _sheet_frame(canvas,project,"Стройгенплан. Расстановка башенных кранов",str(number)); canvas.restoreState(); canvas.showPage()
 
 
-def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, number: int, draw_source: bool = True) -> None:
-    font=_font(); width,height=landscape(A3); canvas.saveState(); canvas.setFont(font,14); canvas.setFillColor(NAVY)
-    canvas.drawString(22*mm,height-13*mm,f"ВЫСОТНАЯ ПРИВЯЗКА. Вариант {number}")
-    left,bottom=22*mm,48*mm; draw_w,draw_h=width-29*mm,height-68*mm
-    source=Path(project.source_section_pdf) if project.source_section_pdf else None
-    calibrated=bool(source and source.exists() and project.section_m_per_pixel>0)
-    section_transform=None
+class _SectionRecorder:
+    """Collect the existing ReportLab primitives with their final paper coordinates."""
+
+    def __init__(self, page_size):
+        self._pagesize = page_size
+        self.commands = []
+
+    def __getattr__(self, name):
+        if name not in {
+            "line", "rect", "circle", "arc", "drawPath", "drawString", "drawRightString",
+            "drawCentredString", "setDash", "setLineWidth", "setStrokeColor", "setFillColor",
+            "setFont",
+        }:
+            raise AttributeError(name)
+
+        def record(*args, **kwargs):
+            self.commands.append(methodcaller(name, *args, **kwargs))
+
+        return record
+
+    def beginPath(self):
+        return PDFPathObject()
+
+    def table(self, rows, x, y_top, widths, font, size):
+        table = _canvas_table_object(rows, widths, font, size)
+        _, height = table.wrap(sum(widths), 1000 * mm)
+        bottom = y_top - height
+        self.commands.append(partial(table.drawOn, x=x, y=bottom))
+        return bottom
+
+
+def _section_ink_bounds(page_size, commands):
+    """Measure recorded objects, including stroke widths and positioned text."""
+    import pypdfium2 as pdfium
+
+    packet = io.BytesIO()
+    proof = Canvas(packet, pagesize=page_size)
+    for command in commands:
+        command(proof)
+    proof.showPage()
+    proof.save()
+    with pdfium.PdfDocument(packet.getvalue()) as document:
+        page = document[0]
+        return [obj.get_bounds() for obj in page.get_objects(max_depth=1)]
+
+
+@dataclass(frozen=True)
+class SectionDrawing:
+    """Final page-space commands used both for ink measurement and PDF output."""
+
+    page_size: tuple[float, float]
+    commands: tuple[Callable, ...]
+    background_rect: tuple[float, float, float, float] | None
+    background_image: Callable | None
+    table_clears_inset: bool
+    notes_fit: bool
+
+    def draw(self, canvas, *, draw_source=True):
+        if canvas._pagesize != self.page_size:
+            raise ValueError("Размер листа разреза не соответствует проверенному формату")
+        if not self.notes_fit:
+            raise ValueError("Примечания разреза не помещаются с требуемым зазором")
+        canvas.saveState()
+        if self.background_rect is not None and draw_source:
+            image = ImageReader(self.background_image())
+            canvas.drawImage(image, *self.background_rect, preserveAspectRatio=True, mask="auto")
+        for command in self.commands:
+            command(canvas)
+        canvas.restoreState()
+        canvas.showPage()
+
+    def fits_frame(self):
+        """Measure the same vectors, positioned glyphs, table cells and stamp as output."""
+        if not self.table_clears_inset or not self.notes_fit:
+            return False
+        width, height = self.page_size
+        # PDFium's conservative path bounds include one line width around the
+        # frame centreline. Allow 0.01 pt for PDF coordinate serialization.
+        bleed = SHEET_FRAME_LINE_WIDTH + 0.01
+        x, y, w, h = _sheet_frame_rect(width, height)
+
+        def inside(bounds):
+            left, bottom, right, top = bounds
+            return x - bleed <= left <= right <= x + w + bleed and y - bleed <= bottom <= top <= y + h + bleed
+
+        # The aspect-fitted crop can occupy at most this exact destination box.
+        if self.background_rect is not None:
+            left, bottom, image_width, image_height = self.background_rect
+            if not inside((left, bottom, left + image_width, bottom + image_height)):
+                return False
+
+        return all(inside(bounds) for bounds in _section_ink_bounds(self.page_size, self.commands))
+
+
+def _section_notes(canvas, font, notes):
+    """Fit complete notes into a free interval beside the stamp on either section."""
+    # The footer sits inside the frame and below the calibrated source/inset.
+    # One extra point covers glyph side bearings and PDF coordinate rounding.
+    gap = 3 * mm + 1
+    left = 22 * mm
+    right = _stamp_left(canvas._pagesize[0]) - gap
+    bottom, top = 6 * mm, 20 * mm
+    blocked = sorted(
+        (x0 - gap, x1 + gap)
+        for x0, y0, x1, y1 in _section_ink_bounds(canvas._pagesize, canvas.commands)
+        if y0 < top + gap and y1 > bottom - gap and x1 + gap > left and x0 - gap < right
+    )
+    size, leading = 7, 4 * mm
+    for start, end in [*blocked, (right, right)]:
+        width = start - left
+        if width > 0:
+            lines = [(color, line) for color, note in notes for line in simpleSplit(note, font, size, width)]
+            baseline = 8 * mm + (len(lines) - 1) * leading
+            if baseline + size <= top and all(pdfmetrics.stringWidth(line, font, size) <= width for _, line in lines):
+                canvas.setFont(font, size)
+                for color, line in lines:
+                    canvas.setFillColor(color)
+                    canvas.drawString(left, baseline, line)
+                    baseline -= leading
+                return True
+        left = max(left, end)
+    return False
+
+
+def _joint_vertical_geometry(scenario):
+    from math import isfinite, isclose
+    joint = scenario.joint_plan
+    if joint is None or len(scenario.placements) != 2:
+        raise ValueError("Для совместной работы требуется подтверждённая геометрия двух кранов")
+    levels = [p.jib_level_m for p in scenario.placements]
+    if any(type(value) not in (int, float) or not isfinite(value) for value in levels):
+        raise ValueError("Отсутствуют подтверждённые отметки осей стрел")
+    separation = abs(levels[1] - levels[0])
+    if (type(joint.vertical_separation_m) not in (int, float)
+            or not isfinite(joint.vertical_separation_m) or joint.vertical_separation_m < 0):
+        raise ValueError("Разность отметок стрел должна быть конечной и неотрицательной")
+    if not isclose(separation, joint.vertical_separation_m, abs_tol=.001, rel_tol=0):
+        raise ValueError("Разность отметок осей стрел не соответствует графику совместной работы")
+    if (type(joint.jib_structural_height_m) not in (int, float)
+            or not isfinite(joint.jib_structural_height_m) or joint.jib_structural_height_m < 0):
+        raise ValueError("Конструктивная высота стрелы должна быть конечной и неотрицательной")
+    minimum = joint.minimum_vertical_clearance_m
+    if type(minimum) not in (int, float) or not isfinite(minimum) or minimum < 1.0:
+        raise ValueError("Минимальный вертикальный зазор должен быть конечным и не менее 1 м")
+    required = joint.jib_structural_height_m + minimum
+    if separation < required and not isclose(separation, required, abs_tol=1e-12, rel_tol=0):
+        raise ValueError("Недостаточный вертикальный зазор между стрелами")
+    higher = 1 if levels[0] > levels[1] else 2
+    if type(joint.higher_crane_index) is not int or joint.higher_crane_index != higher:
+        raise ValueError("Верхний кран не соответствует фактическому порядку отметок стрел")
+    if type(joint.priority_crane_index) is not int or joint.priority_crane_index not in (1, 2):
+        raise ValueError("Неверный приоритет кранов в графике совместной работы")
+    return separation, separation - joint.jib_structural_height_m
+
+
+def build_section_drawing(project, scenario, number, page_size, transform_contract, stage_label=""):
+    canvas = _SectionRecorder(page_size)
+    font = _font()
+    width, height = page_size
+    canvas.setFont(font,14); canvas.setFillColor(NAVY)
+    stage_suffix=f". {stage_label}" if stage_label else ""
+    identity = f"Лист {number}" if str(number).startswith("ГЧ-") else f"Вариант {number}"
+    canvas.drawString(22*mm,height-13*mm,f"ВЫСОТНАЯ ПРИВЯЗКА. {identity}{stage_suffix}")
+    calibrated = transform_contract.calibrated
+    background_rect = background_image = None
     if calibrated:
-        left,bottom,shown_w,shown_h,scale=_pdf_layout(source,project.section_render_scale,left,bottom,draw_w,draw_h,project.section_crop_box)
-        if draw_source:
-            image=render_page(source,0,project.section_render_scale,project.section_crop_box,project.section_background_intensity)
-            canvas.drawImage(ImageReader(image),left,bottom,shown_w,shown_h,preserveAspectRatio=True,mask="auto")
-        def cv_height(value):
-            px=project.section_origin_x_px+project.section_axis_dx*(value/project.section_m_per_pixel)
-            py=project.section_origin_y_px+project.section_axis_dy*(value/project.section_m_per_pixel)
-            return left+px*scale,bottom+(shown_h/scale-py)*scale
-        def section_transform(point):
-            horizontal,value=point; ux,uy=project.section_axis_dx,project.section_axis_dy
-            px=project.section_origin_x_px+(value*ux+horizontal*uy)/project.section_m_per_pixel
-            py=project.section_origin_y_px+(value*uy-horizontal*ux)/project.section_m_per_pixel
-            return left+px*scale,bottom+(shown_h/scale-py)*scale
-    else:
-        origin=(70*mm,35*mm); available=height-65*mm; max_height=max([(p.accepted_crane_height_m or p.jib_level_m or p.required_hook_height_m) for p in scenario.placements]+[project.parapet_m-project.pit_bottom_m,1])
-        cv_height=lambda value:(origin[0],origin[1]+value/max_height*available)
-        section_transform=lambda point:(origin[0]+point[0]*mm,origin[1]+point[1]/max_height*available)
+        background_rect = (transform_contract.left, transform_contract.bottom,
+                           transform_contract.shown_width, transform_contract.shown_height)
+        background_image = partial(render_page, Path(project.source_section_pdf), 0, project.section_render_scale,
+                                   tuple(project.section_crop_box), project.section_background_intensity)
+    cv_height=transform_contract.height_point
+    section_transform=transform_contract.point
     ox,oy=cv_height(0); px,py=cv_height(project.parapet_m-project.pit_bottom_m)
     building_height=project.parapet_m-project.pit_bottom_m
     building_x=ox+25*mm
@@ -347,7 +548,7 @@ def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResul
         display_positions[higher]=ox+separation/2
     schedule_rows=[["Кран / прист.","Отметка","Этаж","Секц.","H крана","Тяга"]]
     for index,placement in enumerate(scenario.placements,1):
-        jib_level=placement.accepted_crane_height_m or placement.jib_level_m or placement.required_hook_height_m
+        jib_level=placement.jib_level_m if placement.jib_level_m is not None else placement.required_hook_height_m
         _,ty=cv_height(jib_level); color=[colors.HexColor("#004C99"),colors.HexColor("#C05000")][(index-1)%2]
         base_x=display_positions[index-1]
         jib_visual=max(15*mm,min(70*mm,(placement.jib_length_m or placement.max_radius_m)*jib_scale))
@@ -367,28 +568,48 @@ def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResul
             if target_x>=base_x: canvas.drawString(target_x+2*mm,tie_y+1.5*mm,tie_label)
             else: canvas.drawRightString(target_x-2*mm,tie_y+1.5*mm,tie_label)
             schedule_rows.append([f"К{index}/П{stage_index+1}",f"{level:.1f}",str(floor),str(sections),f"{placement.accepted_crane_height_m:.1f}",f"{project.tie_length_m:.1f}/{placement.required_tie_length_m:.1f}"])
+    table_clears_inset = True
     if len(schedule_rows)>1:
         table_widths=[15*mm,13*mm,10*mm,10*mm,15*mm,20*mm]
-        _canvas_table(canvas,schedule_rows,width-sum(table_widths)-9*mm,height-20*mm,table_widths,font,5.2)
+        table_bottom = canvas.table(schedule_rows,width-sum(table_widths)-9*mm,height-20*mm,table_widths,font,5.2)
         # Small plan inset: pair of ties at the specified angle, directed to the building.
         cx,cy=width-48*mm,72*mm; ray=20*mm; half=radians(project.tie_angle_deg/2)
+        table_clears_inset = table_bottom >= cy + max(15 * mm, abs(ray * sin(half))) + 1 * mm
         canvas.setStrokeColor(colors.HexColor("#7A1FA2")); canvas.setLineWidth(1.2); canvas.rect(cx-3*mm,cy-3*mm,6*mm,6*mm)
         for angle in (-half,half): canvas.line(cx,cy,cx+ray*cos(angle),cy+ray*sin(angle))
         canvas.setStrokeColor(colors.HexColor("#0066CC")); canvas.line(cx+ray*cos(half)+3*mm,cy-15*mm,cx+ray*cos(half)+3*mm,cy+15*mm)
         canvas.setFillColor(colors.black); canvas.setFont(font,5.5); canvas.drawCentredString(cx+8*mm,cy-19*mm,f"План: две тяги {project.tie_length_m:.1f} м; угол {project.tie_angle_deg:.0f}°")
+    notes = []
     if scenario.joint_plan:
         canvas.setFillColor(RED); canvas.setFont(font,7)
-        joint=scenario.joint_plan; canvas.drawString(22*mm,53*mm,f"Разность осей стрел {joint.vertical_separation_m:.1f} м = высота конструкции {joint.jib_structural_height_m:.1f} м + свободный зазор 1.0 м.")
+        joint = scenario.joint_plan
+        separation, clearance = _joint_vertical_geometry(scenario)
+        joint_note = (f"Разность осей стрел {separation:.1f} м = "
+                      f"высота конструкции {joint.jib_structural_height_m:.1f} м + свободный зазор {clearance:.1f} м (не менее {joint.minimum_vertical_clearance_m:.1f} м).")
+        notes.append((RED, joint_note))
         if len(scenario.placements)>=2:
             higher_index=joint.higher_crane_index-1; lower_index=1-higher_index
-            low=scenario.placements[lower_index].jib_level_m or scenario.placements[lower_index].required_hook_height_m; high=scenario.placements[higher_index].jib_level_m or scenario.placements[higher_index].required_hook_height_m
+            low=scenario.placements[lower_index].jib_level_m; high=scenario.placements[higher_index].jib_level_m
             _,yl=cv_height(low+joint.jib_structural_height_m/2); _,yh=cv_height(high-joint.jib_structural_height_m/2); dim_x=px+88*mm
             canvas.setStrokeColor(RED); canvas.setLineWidth(.7); canvas.line(dim_x,yl,dim_x,yh); canvas.line(dim_x-2*mm,yl,dim_x+2*mm,yl); canvas.line(dim_x-2*mm,yh,dim_x+2*mm,yh)
-            canvas.drawString(dim_x+3*mm,(yl+yh)/2,"чистый зазор 1.0 м")
+            canvas.drawString(dim_x+3*mm,(yl+yh)/2,f"чистый зазор {clearance:.1f} м")
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
     note="Привязка выполнена по двум точкам PDF-разреза. Схема пристёжек предварительная; узлы и нагрузки - отдельный проект." if calibrated else "Разрез не откалиброван: показана расчётная схема без привязки к исходному PDF."
-    canvas.drawString(105*mm,49*mm,note); canvas.drawRightString(width-7*mm,49*mm,"Проверить по паспорту крана и проекту пристёжек")
-    _sheet_frame(canvas,project,"Высотная привязка башенного крана",str(number)); canvas.restoreState(); canvas.showPage()
+    passport_note = "Проверить по паспорту крана и проекту пристёжек"
+    notes.extend(((colors.black, note), (colors.black, passport_note)))
+    _project_stamp(canvas,project,"Высотная привязка башенного крана",str(number))
+    notes_fit = _section_notes(canvas, font, notes)
+    _sheet_border(canvas)
+    return SectionDrawing(page_size, tuple(canvas.commands), background_rect, background_image, table_clears_inset, notes_fit)
+
+
+def _section_page(canvas: Canvas, project: ProjectInput, scenario: ScenarioResult, number: int | str,
+                  draw_source: bool = True, stage_label: str = "") -> None:
+    from .pprk_sheets import section_transform_contract
+
+    transform = section_transform_contract(project, scenario, canvas._pagesize)
+    drawing = build_section_drawing(project, scenario, number, canvas._pagesize, transform, stage_label)
+    drawing.draw(canvas, draw_source=draw_source)
 
 
 def _wrapped(canvas, text, x, y, width_chars=55, leading=3.5*mm, max_lines=4):
@@ -401,13 +622,25 @@ def _wrapped(canvas, text, x, y, width_chars=55, leading=3.5*mm, max_lines=4):
     for index,line in enumerate(lines[:max_lines]): canvas.drawString(x,y-index*leading,line)
 
 
-def _canvas_table(canvas, rows, x, y_top, widths, font, size=6.2, header=True):
+def _canvas_table_object(rows, widths, font, size=6.2, header=True):
     style=ParagraphStyle("CanvasCell",fontName=font,fontSize=size,leading=size+1,alignment=TA_CENTER,textColor=colors.black)
     data=[[Paragraph(str(value),style) for value in row] for row in rows]
     table=Table(data,colWidths=widths,repeatRows=1 if header else 0)
     commands=[("FONTNAME",(0,0),(-1,-1),font),("GRID",(0,0),(-1,-1),.45,colors.black),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),("TOPPADDING",(0,0),(-1,-1),2),("BOTTOMPADDING",(0,0),(-1,-1),2)]
     if header: commands.append(("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E8E8E8")))
-    table.setStyle(TableStyle(commands)); _,height=table.wrap(sum(widths),1000*mm); table.drawOn(canvas,x,y_top-height); return height
+    table.setStyle(TableStyle(commands))
+    return table
+
+
+def _canvas_table_height(rows, widths, font, size=6.2, header=True):
+    table=_canvas_table_object(rows,widths,font,size,header)
+    _,height=table.wrap(sum(widths),1000*mm)
+    return height
+
+
+def _canvas_table(canvas, rows, x, y_top, widths, font, size=6.2, header=True):
+    table=_canvas_table_object(rows,widths,font,size,header)
+    _,height=table.wrap(sum(widths),1000*mm); table.drawOn(canvas,x,y_top-height); return height
 
 
 def _sling_type(name: str) -> tuple[str,str]:
@@ -546,10 +779,11 @@ def _coordination_page(canvas: Canvas, project: ProjectInput, scenario: Scenario
         _draw_sector_overlay(canvas,center,radius,p,color)
         _draw_tower_crane_plan(canvas,center,target,radius,color,f"К{index}: {p.model}")
     table_x=292*mm; table_y=height-27*mm
-    rows=[["Параметр","Расчётное значение"],["Расстояние между осями",f"{joint.axis_distance_m:.1f} м"],["Рабочий горизонтальный разрыв",f"не менее {joint.working_horizontal_clearance_m:.1f} м"],["Разведение осей стрел",f"{joint.vertical_separation_m:.1f} м = {joint.jib_structural_height_m:.1f} + 1.0"],["Стоянка: горизонталь / вертикаль",f"{joint.parking_horizontal_clearance_m:.1f} / 1.0 м"],["Защитный габарит башен",f"{joint.tower_protection_radius_m:.1f} + {joint.tower_protection_radius_m:.1f} = {joint.combined_tower_envelope_m:.1f} м"],["Площадь общей зоны",f"{joint.overlap_area_m2:.1f} м²"],["Приоритет / верхний кран",f"К{joint.priority_crane_index} / К{joint.higher_crane_index}"]]
+    separation, clearance = _joint_vertical_geometry(scenario)
+    rows=[["Параметр","Расчётное значение"],["Расстояние между осями",f"{joint.axis_distance_m:.1f} м"],["Рабочий горизонтальный разрыв",f"не менее {joint.working_horizontal_clearance_m:.1f} м"],["Разведение осей стрел",f"{separation:.1f} м = {joint.jib_structural_height_m:.1f} + {clearance:.1f}; зазор ≥{joint.minimum_vertical_clearance_m:.1f} м"],["Стоянка: горизонталь / вертикаль",f"{joint.parking_horizontal_clearance_m:.1f} / 1.0 м"],["Защитный габарит башен",f"{joint.tower_protection_radius_m:.1f} + {joint.tower_protection_radius_m:.1f} = {joint.combined_tower_envelope_m:.1f} м"],["Площадь общей зоны",f"{joint.overlap_area_m2:.1f} м²"],["Приоритет / верхний кран",f"К{joint.priority_crane_index} / К{joint.higher_crane_index}"]]
     for index,p in enumerate(placements,1):
         sector=_sector_text(p.allowed_sector_start_deg,p.allowed_sector_end_deg)
-        rows.extend([[f"К{index}: длина стрелы",f"{p.jib_length_m:.1f} м (шаг 5 м)"],[f"К{index}: уровень стрелы",f"{(p.jib_level_m or p.required_hook_height_m):.1f} м"],[f"К{index}: разрешённый сектор",sector],[f"К{index}: точек контура",str(len(p.assigned_contour_points))]])
+        rows.extend([[f"К{index}: длина стрелы",f"{p.jib_length_m:.1f} м (шаг 5 м)"],[f"К{index}: уровень стрелы",f"{p.jib_level_m:.1f} м"],[f"К{index}: разрешённый сектор",sector],[f"К{index}: точек контура",str(len(p.assigned_contour_points))]])
     table_h=_canvas_table(canvas,rows,table_x,table_y,[54*mm,63*mm],font,7)
     canvas.setFillColor(NAVY); canvas.setFont(font,9); canvas.drawString(table_x,table_y-table_h-8*mm,"ЛОГИКА БЛОКИРОВОК И ОЧЕРЁДНОСТИ")
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
@@ -622,8 +856,9 @@ def _joint_work_schedule_page(canvas: Canvas, project: ProjectInput, scenario: S
     panel_y=87*mm; panel_w=91*mm; panel_h=93*mm
     for phase in range(1,5): _draw_joint_phase_panel(canvas,project,scenario,(22+(phase-1)*94)*mm,panel_y,panel_w,panel_h,phase)
     canvas.setFillColor(colors.black); canvas.setFont(font,7)
+    separation, clearance = _joint_vertical_geometry(scenario)
     notes=[
-        f"Высотное разделение: оси стрел {joint.vertical_separation_m:.1f} м = конструктивная высота стрелы {joint.jib_structural_height_m:.1f} м + чистый зазор 1.0 м.",
+        f"Высотное разделение: оси стрел {separation:.1f} м = конструктивная высота стрелы {joint.jib_structural_height_m:.1f} м + чистый зазор {clearance:.1f} м (не менее {joint.minimum_vertical_clearance_m:.1f} м).",
         f"У каждой башни показан защитный габарит {joint.tower_protection_radius_m:.1f} м от оси; суммарно для пары 2+2 = {joint.combined_tower_envelope_m:.1f} м.",
         "Переход между этапами выполняется только после голосового подтверждения ответственного специалиста; время этапов определяется фактическим производственным циклом.",
         "График сформирован по принципу четырёх последовательных схем совместной работы из загруженного ППРк; уставки уточняются при наладке координатной защиты.",
@@ -649,8 +884,245 @@ def _restamp_page_numbers(path: Path) -> None:
     temporary.replace(path)
 
 
-def generate_report(path: str|Path, project: ProjectInput, scenarios: list[ScenarioResult], selected_pages: list[int] | None = None) -> Path:
-    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True); font=_font(); styles=getSampleStyleSheet()
+def _apply_document_status(path: Path, text: str, *, reference_page_start: int | None = None) -> None:
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(path))
+    writer = PdfWriter()
+    font = _font()
+    for page_number, page in enumerate(reader.pages, 1):
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        packet = io.BytesIO()
+        overlay = Canvas(packet, pagesize=(width, height))
+        if reference_page_start is not None and page_number >= reference_page_start:
+            from .pprk_text_report import _draw_cell_text
+            # Reserve the right footer for the physical page number. Reference
+            # images start above 18 mm; this bounded status cell ends at 13 mm.
+            _draw_cell_text(overlay, text, 20 * mm, 5 * mm, width - 75 * mm, 8 * mm,
+                            font_size=10, placeholder=True)
+            overlay.save()
+            packet.seek(0)
+            writer.add_page(page)
+            writer.pages[-1].merge_page(PdfReader(packet).pages[0])
+            continue
+        overlay.saveState()
+        try:
+            overlay.setFillAlpha(0.2)
+        except AttributeError:
+            pass
+        overlay.setFillColor(RED)
+        overlay.setFont(font, min(23, max(12, width / 45)))
+        overlay.translate(width / 2, height / 2)
+        overlay.rotate(32)
+        overlay.drawCentredString(0, 0, text)
+        overlay.restoreState()
+        overlay.save()
+        packet.seek(0)
+        writer.add_page(page)
+        writer.pages[-1].merge_page(PdfReader(packet).pages[0])
+    temporary = path.with_suffix(".status.pdf")
+    with temporary.open("wb") as stream:
+        writer.write(stream)
+    temporary.replace(path)
+
+
+def _render_bundle_report(path, project, scenarios, selected_pages, document_status, bundle, external_page_overrides=None):
+    from dataclasses import replace
+    from .pprk_assets import load_asset_manifest
+    from .pprk_appendices import draw_asset_appendix, expand_bundle_appendices, plan_asset_appendices
+    from .pprk_text_report import render_pprk_text_report
+    from .pprk_sheets import (
+        CalculatedSheetRenderContext,
+        bind_calculated_scenario,
+        calculated_sheet_page_map,
+        draw_calculated_sheet,
+        expand_bundle_graphical_parts,
+        plan_calculated_sheets,
+    )
+
+    if selected_pages is not None:
+        raise ValueError("Состав и порядок bundle-ППРк фиксированы; выбор отдельных листов недопустим")
+    has_graphics = any(part.kind == "graphical" for part in bundle.parts)
+    if has_graphics:
+        if not scenarios:
+            raise ValueError("Для расчётных графических листов отсутствует сценарий")
+        scenario = bind_calculated_scenario(bundle, scenarios)
+        plans = plan_calculated_sheets(bundle, project, scenario)
+        rendered_bundle = expand_bundle_graphical_parts(bundle, plans)
+    else:
+        scenario = None
+        plans = ()
+        rendered_bundle = bundle
+    assets = load_asset_manifest()
+    appendices = plan_asset_appendices(rendered_bundle, assets)
+    rendered_bundle = expand_bundle_appendices(rendered_bundle, appendices)
+    appendix_blockers = [issue for issue in rendered_bundle.completeness_issues
+                         if issue.code == "PPRK_APPENDIX_REQUIRED" and issue.blocking]
+    if appendix_blockers:
+        raise ValueError("Приложения ППРк требуют предварительной редакции: " + "; ".join(issue.message for issue in appendix_blockers))
+    if external_page_overrides is not None:
+        # Final assembly replaces page 4 with paginated physical contents.
+        # Keep this provisional leaf independent of the original entry count.
+        rendered_bundle = replace(rendered_bundle, contents=())
+    omitted_appendices = {
+        part.part_id: "НЕ ПРИМЕНИМО: нет активных грузов"
+        for part in bundle.parts
+        if part.part_id == "appendix.SLINGING_CARDS" and bundle.active_loads == ()
+    }
+    render_pprk_text_report(path, rendered_bundle, author=project.author or "", page_overrides=None if plans else {**omitted_appendices, **(external_page_overrides or {})})
+    if plans or appendices:
+        from pypdf import PdfReader, PdfWriter
+        writer = PdfWriter()
+        text_page_count = len(PdfReader(str(path)).pages)
+        designation_by_id = {plan.sheet_id: plan.designation for plan in plans}
+        for plan in plans:
+            designation_by_id.setdefault(plan.source_sheet_id, plan.designation)
+        for _ in range(4):
+            page_map = calculated_sheet_page_map(plans, text_page_count + 1)
+            overrides = {**omitted_appendices, **(external_page_overrides or {}), **{
+                sheet_id: f"{designation_by_id[sheet_id]} / стр. {page}"
+                for sheet_id, page in page_map.items()
+                if sheet_id in designation_by_id
+            }}
+            for index, appendix in enumerate(appendices, text_page_count + len(plans) + 1):
+                overrides[appendix.sheet_id] = f"стр. {index}"
+                overrides.setdefault(appendix.source_sheet_id, f"стр. {index}")
+            render_pprk_text_report(
+                path,
+                rendered_bundle,
+                author=project.author or "",
+                page_overrides=overrides,
+            )
+            updated_count = len(PdfReader(str(path)).pages)
+            if updated_count == text_page_count:
+                break
+            text_page_count = updated_count
+        else:
+            raise ValueError("Карта страниц ППРк не стабилизировалась")
+        text_pages = PdfReader(str(path)).pages
+        for page in text_pages:
+            writer.add_page(page)
+        if any(page_map[plan.sheet_id] != len(text_pages) + index for index, plan in enumerate(plans, 1)):
+            raise ValueError("Нарушена карта физических графических листов")
+        binding = bundle.calculation_binding
+        render_context = CalculatedSheetRenderContext(
+            project,
+            scenario,
+            verified_danger_zone_offset_m=(binding.verified_danger_zone_offset_m if binding else None),
+            require_verified_danger_zone=bool(binding and binding.scenario_render_sha256),
+            scenario_index=binding.scenario_index if binding else 0,
+            protocol_run_id=binding.protocol_run_id if binding else "",
+            protocol_result_sha256=binding.protocol_result_sha256 if binding else "",
+        )
+        for plan in plans:
+            packet = io.BytesIO()
+            sheet_canvas = Canvas(packet, pagesize=plan.sheet_format.page_size)
+            draw_calculated_sheet(sheet_canvas, plan, render_context)
+            sheet_canvas.save()
+            packet.seek(0)
+            generated = PdfReader(packet)
+            if len(generated.pages) != 1:
+                raise ValueError(f"Лист {plan.sheet_id} должен формировать ровно одну страницу")
+            writer.add_page(generated.pages[0])
+        for index, appendix in enumerate(appendices, len(text_pages) + len(plans) + 1):
+            packet = io.BytesIO()
+            appendix_canvas = Canvas(packet)
+            draw_asset_appendix(appendix_canvas, replace(appendix, page_number=index), assets)
+            appendix_canvas.save()
+            packet.seek(0)
+            generated = PdfReader(packet)
+            if len(generated.pages) != 1:
+                raise ValueError(f"Приложение {appendix.sheet_id} должно формировать ровно одну страницу")
+            writer.add_page(generated.pages[0])
+        temporary = path.with_suffix(".calculated.tmp.pdf")
+        with temporary.open("wb") as stream:
+            writer.write(stream)
+        temporary.replace(path)
+    if document_status:
+        _apply_document_status(path, document_status, reference_page_start=(len(text_pages) + len(plans) + 1) if appendices else None)
+    return path
+
+
+
+def generate_report(
+    path: str | Path,
+    project: ProjectInput,
+    scenarios: list[ScenarioResult],
+    selected_pages: list[int] | None = None,
+    *,
+    document_status: str | None = None,
+    bundle: "PPRKBundle | None" = None,
+) -> Path:
+    """Publish only a scanned PDF; preserve legacy API and prior destinations."""
+    from tempfile import TemporaryDirectory
+    from .pprk_release_validation import validate_release_inputs, validate_release_pdf, snapshot_underlays
+    validate_release_inputs(project, scenarios, bundle)
+    checked_scenarios = scenarios
+    if bundle is not None:
+        from .pprk_sheets import bind_calculated_scenario
+        checked_scenarios = ([bind_calculated_scenario(bundle, scenarios)]
+                             if any(part.kind == "graphical" for part in bundle.parts) else [])
+    for scenario in checked_scenarios:
+        if scenario.joint_plan is not None:
+            _joint_vertical_geometry(scenario)
+    from .pprk_merge import _aliases
+    output = Path(path)
+    for source in (project.source_plan_pdf, project.source_section_pdf):
+        if source and _aliases(Path(source), output):
+            raise ValueError("Выходной PDF совпадает с исходной подложкой")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Use the local temp root to avoid deep GUI-report paths on Windows. Neither
+    # planning nor raster/vector rendering may reopen the mutable source paths.
+    from .runtime_paths import writable_temp_root
+    with TemporaryDirectory(dir=writable_temp_root(), prefix=".pprk-underlays-") as snapshots:
+        rendering_project = snapshot_underlays(project, snapshots)
+        if bundle is not None:
+            return _generate_report(output, rendering_project, scenarios, selected_pages,
+                                    document_status=document_status, bundle=bundle)
+        with TemporaryDirectory(dir=output.parent, prefix=".pprk-legacy-") as directory:
+            staged = Path(directory) / "report.pdf"
+            _generate_report(staged, rendering_project, scenarios, selected_pages, document_status=document_status)
+            validate_release_pdf(staged)
+            staged.replace(output)
+    return output
+
+
+def _generate_report(
+    path: str | Path,
+    project: ProjectInput,
+    scenarios: list[ScenarioResult],
+    selected_pages: list[int] | None = None,
+    *,
+    document_status: str | None = None,
+    bundle: "PPRKBundle | None" = None,
+) -> Path:
+    path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
+    if bundle is not None:
+        from .pprk_composer import effective_render_project
+        from .pprk_release_validation import validate_release_inputs
+        validate_release_inputs(project, bundle, scenarios)
+        project = effective_render_project(bundle, project)
+        from .pprk_merge import PPRKMergeError, assemble_pprk_report, external_document_issues
+        from .pprk_models import CompletenessIssue, ReleaseStatus
+        if bundle.requested_status in (ReleaseStatus.COORDINATION, ReleaseStatus.APPROVED, ReleaseStatus.PRODUCTION):
+            blockers = [i for i in bundle.completeness_issues if i.blocking]
+            if bundle.effective_status != bundle.requested_status or blockers:
+                raise PPRKMergeError(blockers or (CompletenessIssue("PPRK_STATUS_BLOCKED", "Запрошенный статус недоступен"),))
+        external_blockers = tuple(
+            issue for issue in external_document_issues(bundle) if issue.blocking
+        )
+        if bundle.requested_status == ReleaseStatus.PRODUCTION and external_blockers:
+            raise PPRKMergeError(external_blockers)
+        assemble_pprk_report(
+            path, project, bundle,
+            lambda main, prepared, overrides: _render_bundle_report(
+                main, project, scenarios, selected_pages, document_status, prepared, overrides,
+            ),
+            document_status=document_status,
+        )
+        return path
+    font=_font(); styles=getSampleStyleSheet()
     for style in styles.byName.values(): style.fontName=font
     title=ParagraphStyle("PPRKTitle",parent=styles["Title"],fontName=font,fontSize=17,leading=21,textColor=colors.black,alignment=TA_CENTER,spaceAfter=8*mm)
     h1=ParagraphStyle("PPRKH1",parent=styles["Heading1"],fontName=font,fontSize=13,leading=16,textColor=colors.black,spaceBefore=2*mm,spaceAfter=4*mm)
@@ -663,7 +1135,7 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         _table([["Объект",project.name or blank],["Местонахождение",project.city or blank],["Организация",project.organization or blank],["Шифр / стадия",f"{project.project_code or blank} / {project.project_stage or 'ППРк'}"],["Разработчик ППРк",author],["Проверил",project.checked_by or blank],["Утвердил",project.approved_by or blank],["Контактный e-mail",email],["Год",str(project.year)]],font,[48*mm,122*mm],9,False),
         Spacer(1,20*mm),_table([["Разработал","________________","____________","__________"],["Проверил","________________","____________","__________"],["Утвердил","________________","____________","__________"]],font,[35*mm,55*mm,40*mm,40*mm],8,False),
         Spacer(1,12*mm),Paragraph("Подписи, должности, организация, шифр проекта и согласования заполняются разработчиком до выпуска документа в производство.",small),PageBreak()]
-    sheets=[("Пояснительная записка","Исходные данные, технология, организация и безопасность"),("Сравнение вариантов","До трёх вариантов размещения"),("Стройгенплан","Эскиз поверх исходного PDF-плана"),("Высотная привязка","Требуемая высота крюка и отметки"),("Грузовая ведомость","Массы, габариты, оснастка и количество подъёмов"),("Схемы строповки","Типовые схемы для каждого груза"),("Опасные зоны","Границы работы и перемещения грузов"),("Разгрузка, складирование и подача","Технологическая схема материального потока"),("Подъём и монтаж элемента","Последовательность безопасной операции"),("Совместная работа кранов","Зоны и организационные ограничения"),("Требования охраны труда и промышленной безопасности","Обязательные организационные меры"),("Контрольные листы","Проверка исходных данных и готовности"),("Лист регистрации изменений","Заполняется при корректировках")]
+    sheets=[("Пояснительная записка","Исходные данные, технология, организация и безопасность"),("Сравнение вариантов","До трёх вариантов размещения"),("Стройгенплан","Эскиз поверх исходного PDF-плана"),("Листы СОЗР","Точки ограничения, условные и постоянные вырезы по каждому крану"),("Высотная привязка","Требуемая высота крюка и отметки"),("Грузовая ведомость","Массы, габариты, оснастка и количество подъёмов"),("Схемы строповки","Типовые схемы для каждого груза"),("Опасные зоны","Границы работы и перемещения грузов"),("Разгрузка, складирование и подача","Технологическая схема материального потока"),("Подъём и монтаж элемента","Последовательность безопасной операции"),("Совместная работа кранов","Зоны и организационные ограничения"),("Требования охраны труда и промышленной безопасности","Обязательные организационные меры"),("Контрольные листы","Проверка исходных данных и готовности"),("Лист регистрации изменений","Заполняется при корректировках")]
     story += [Paragraph("ВЕДОМОСТЬ СОСТАВА ППРк",h1),_table([["№","Наименование","Содержание"]]+[[str(i),a,b] for i,(a,b) in enumerate(sheets,1)],font,[10*mm,65*mm,95*mm]),PageBreak()]
     story += [Paragraph("1. ОБЩИЕ ДАННЫЕ И ОБЛАСТЬ ПРИМЕНЕНИЯ",h1),Paragraph(f"ППРк разработан для объекта «{project.name or 'наименование не заполнено'}» в городе {project.city or 'не указан'}. Несущая система - монолитный железобетон; перегородки - газобетонные блоки; наружная облицовка - вентилируемый фасад.",body),Paragraph("Документ определяет предварительное размещение башенных кранов, проверку охвата, грузовысотных параметров, опасных зон и организацию типовых подъёмов. Расчёт фундамента крана, монтаж и демонтаж крана, проект пристёжек, фасадные люльки и специальные подъёмы разрабатываются отдельно.",body),Paragraph("Исходные документы",h2),_table([["Документ","Статус"],["Векторный PDF-план",Path(project.source_plan_pdf).name if project.source_plan_pdf else "Не приложен"],["PDF-разрез",Path(project.source_section_pdf).name if project.source_section_pdf else "Не приложен"],["Паспорт конкретного крана","Подлежит приложению перед утверждением"],["ПОС / календарный график","Подлежит сверке"],["Геология и решение по основанию","Отдельный расчёт"]],font,[75*mm,95*mm]),Paragraph("Высотные исходные данные",h2),Paragraph(f"Отметка низа котлована: {project.pit_bottom_m:g} м. Отметка верха парапета: {project.parapet_m:g} м. Расчётная высота: {project.parapet_m-project.pit_bottom_m:g} м. Этажей: {project.floors}. Пристёжки: {'допускаются' if project.tie_ins_possible else 'не допускаются'}. Принятая длина парных тяг: {project.tie_length_m:g} м, угол между ними: {project.tie_angle_deg:g}°.",body),Paragraph("Схема пристёжек является предварительной компоновкой. Расчёт тяг, закладных деталей, соединений, нагрузок на башню крана и несущие конструкции здания выполняется отдельным проектом пристёжек по паспорту фактически установленного крана.",body),PageBreak()]
     story += [Paragraph("2. СРАВНЕНИЕ ВАРИАНТОВ И ПРИНЯТОЕ РЕШЕНИЕ",h1)]
@@ -684,6 +1156,10 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         if s.selection_audit:
             story.append(Paragraph("Журнал подбора моделей",h2))
             for line in s.selection_audit: story.append(Paragraph("• "+line,small))
+        route_notes=build_route_explanation(SimpleNamespace(routes=s.routes,route_failures=s.route_failures,warning_acceptances=project.warning_acceptances))
+        if route_notes:
+            story.append(Paragraph("Маршруты подачи и принятые предупреждения",h2))
+            for line in route_notes: story.append(Paragraph("• "+line,small))
     story.append(Paragraph("Алгоритм выбора положения крана",h2))
     algorithm_steps=[
         "Граница площадки покрывается регулярной сеткой с шагом 2 м. Каждая узловая точка рассматривается как возможная ось вращения крана.",
@@ -776,6 +1252,9 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
                 pw,ph=landscape(A4); left,bottom,shown_w,shown_h,_=_pdf_layout(plan_source,project.plan_render_scale,22*mm,48*mm,pw-29*mm,ph-68*mm,project.plan_crop_box)
                 plan_page=_merge_vector_background(plan_page,plan_source,left,bottom,shown_w,shown_h)
             writer.add_page(plan_page)
+            for placement in scenario.placements:
+                if placement.sozr_plan is not None:
+                    packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A3)); draw_sozr_sheet(canvas,project,placement,placement.sozr_plan,len(writer.pages)+1); canvas.save(); packet.seek(0); writer.add_page(PdfReader(packet).pages[0])
             section_source=Path(project.source_section_pdf) if project.source_section_pdf else None; section_vector=bool(section_source and section_source.exists() and project.section_m_per_pixel>0 and tuple(project.section_crop_box)==(0.0,0.0,1.0,1.0) and project.section_background_intensity>=1.0)
             packet=io.BytesIO(); canvas=Canvas(packet,pagesize=landscape(A3)); _section_page(canvas,project,scenario,index,draw_source=not section_vector); canvas.save(); packet.seek(0); section_page=PdfReader(packet).pages[0]
             if section_vector:
@@ -807,4 +1286,6 @@ def generate_report(path: str|Path, project: ProjectInput, scenarios: list[Scena
         with selected_path.open("wb") as stream: selected_writer.write(stream)
         selected_path.replace(path)
     _restamp_page_numbers(path)
+    if document_status:
+        _apply_document_status(path, document_status)
     return path

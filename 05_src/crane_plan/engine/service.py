@@ -1,4 +1,4 @@
-"""Public orchestration API for the CranePlan 2.1 calculation core."""
+"""Public orchestration API for the CranePlan calculation core."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .protocol import CalculationProtocolV3, build_protocol
 from .verification import VerificationReport, VerificationStatus, verify_solution
 
 
-ENGINE_VERSION = "2.1.0"
+ENGINE_VERSION = "3.0.2"
 
 
 @dataclass(frozen=True)

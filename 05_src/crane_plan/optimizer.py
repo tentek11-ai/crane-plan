@@ -11,8 +11,25 @@ from .geometry import (
     candidate_grid, distance, distance_point_to_segment, distance_to_polygon, point_in_polygon,
     polygon_centroid, polygon_inside_polygon, segment_intersects_polygon, validate_polygon,
 )
-from .models import CraneConfiguration, JointCranePlan, Placement, Point, ProjectInput, ScenarioResult
+from .models import (
+    ChainPlanResult,
+    CraneConfiguration,
+    JointCranePlan,
+    LogisticsLeg,
+    Placement,
+    Point,
+    ProjectInput,
+    RouteEndpoint,
+    RouteFailure,
+    RouteFailureCode,
+    ScenarioResult,
+    SiteInput,
+    WorkPoint,
+)
 from .normative import NormativeInputError, danger_zone_offset_from_outer_edge, required_hook_height
+from .restricted_zones import buffered_zone_polygon, jib_may_overfly, load_may_overfly, tower_is_allowed, validate_zone
+from .route_planner import OtherCraneConstraint, RoutePlannerSettings, plan_lift_route
+from .sozr import build_sozr_plan
 from .tieins import calculate_tie_in_plan
 
 
@@ -32,7 +49,7 @@ def _valid_base(point: Point, project: ProjectInput) -> bool:
     # Проверяем не только ось, но и принятый защитный габарит башни.
     if distance_to_polygon(point, site.boundary) + 1e-6 < TOWER_PROTECTION_RADIUS_M:
         return False
-    if any(point_in_polygon(point, zone) or distance_to_polygon(point, zone) < TOWER_PROTECTION_RADIUS_M - 1e-6 for zone in site.restricted_zones):
+    if any(not tower_is_allowed(zone, point, TOWER_PROTECTION_RADIUS_M) for zone in site.restricted_zones):
         return False
     d = distance_to_polygon(point, site.building)
     return max(site.min_crane_to_building_m, TOWER_PROTECTION_RADIUS_M) <= d <= site.max_crane_to_building_m
@@ -87,10 +104,35 @@ def _coverage(point: Point, config: CraneConfiguration, project: ProjectInput) -
         point_ok = True
         point_danger_warning = False
         loads = _loads_for_work_point(project, index)
-        if not loads or not _ray_is_clear(point, wp.point, project):
+        if not loads:
             continue
         for load in loads:
             hook_height = required_hook_height(wp.level_m, load.height_m, 1.5, True)
+            load_bottom = hook_height - load.rigging_height_m - load.height_m
+            angle = atan2(wp.y - point[1], wp.x - point[0])
+            jib_tip = (
+                point[0] + config.jib_length_m * cos(angle),
+                point[1] + config.jib_length_m * sin(angle),
+            )
+            zone_conflict = False
+            for zone in project.site.restricted_zones:
+                polygon = buffered_zone_polygon(zone)
+                if (
+                    not load_may_overfly(zone, load_bottom, project.vertical_clearance_m)
+                    and point_in_polygon(wp.point, polygon)
+                ) or (
+                    not jib_may_overfly(
+                        zone,
+                        config.max_free_standing_hook_height_m - JIB_STRUCTURAL_HEIGHT_M,
+                        project.vertical_clearance_m,
+                    )
+                    and segment_intersects_polygon(point, jib_tip, polygon)
+                ):
+                    zone_conflict = True
+                    break
+            if zone_conflict:
+                point_ok = False
+                break
             if allowed_capacity_kg(config, radius) + 1e-6 < load.total_kg:
                 point_ok = False
                 break
@@ -129,6 +171,217 @@ def _logistics_zones(project: ProjectInput) -> list[tuple[str,list[Point]]]:
     return zones
 
 
+def build_logistics_chains(
+    site: SiteInput,
+    work_point: WorkPoint,
+    *,
+    work_index: int,
+) -> list[list[LogisticsLeg]]:
+    work_id = f"work-{work_index + 1}"
+    destination = RouteEndpoint(work_id, work_point.point, work_point.level_m, "work")
+    unloading = (
+        RouteEndpoint("unloading", polygon_centroid(site.unloading_zone), 0.0, "unloading")
+        if site.unloading_zone
+        else None
+    )
+    chains: list[list[LogisticsLeg]] = []
+    for storage_index, polygon in enumerate(site.storage_zones, start=1):
+        storage_id = f"storage-{storage_index}"
+        storage = RouteEndpoint(storage_id, polygon_centroid(polygon), 0.0, "storage")
+        legs: list[LogisticsLeg] = []
+        if unloading is not None:
+            legs.append(
+                LogisticsLeg(
+                    f"WP{work_index + 1}:unloading->{storage_id}",
+                    "unloading",
+                    "unloading",
+                    "storage",
+                    storage_id,
+                    unloading,
+                    storage,
+                    work_point.load_index,
+                )
+            )
+        legs.append(
+            LogisticsLeg(
+                f"WP{work_index + 1}:{storage_id}->{work_id}",
+                "storage",
+                storage_id,
+                "work",
+                work_id,
+                storage,
+                destination,
+                work_point.load_index,
+            )
+        )
+        chains.append(legs)
+    if not site.storage_zones and unloading is not None:
+        chains.append(
+            [
+                LogisticsLeg(
+                    f"WP{work_index + 1}:unloading->{work_id}",
+                    "unloading",
+                    "unloading",
+                    "work",
+                    work_id,
+                    unloading,
+                    destination,
+                    work_point.load_index,
+                )
+            ]
+        )
+    return chains
+
+
+def evaluate_logistics_chain(
+    placement: Placement,
+    chain: list[LogisticsLeg],
+    project: ProjectInput,
+    settings: RoutePlannerSettings,
+    configuration: CraneConfiguration,
+    other_cranes: tuple[OtherCraneConstraint, ...] = (),
+) -> ChainPlanResult:
+    routes = []
+    crane_point = (placement.x, placement.y)
+    jib_length = placement.jib_length_m or configuration.jib_length_m
+    max_hook_height = placement.accepted_crane_height_m or configuration.max_free_standing_hook_height_m
+    jib_bottom = (
+        placement.jib_level_m
+        if placement.jib_level_m is not None
+        else max_hook_height - JIB_STRUCTURAL_HEIGHT_M
+    )
+    for leg in chain:
+        if leg.load_index < 0 or leg.load_index >= len(project.loads):
+            failure = RouteFailure(RouteFailureCode.NO_PATH, "Для логистической операции не найден груз")
+            return ChainPlanResult(False, routes, [failure], leg)
+        load = project.loads[leg.load_index]
+        for zone in project.site.restricted_zones:
+            polygon = buffered_zone_polygon(zone)
+            if point_in_polygon(leg.source.point, polygon) and not load_may_overfly(
+                zone, leg.source.level_m, settings.vertical_clearance_m
+            ):
+                failure = RouteFailure(
+                    RouteFailureCode.SOURCE_BLOCKED,
+                    f"Центр зоны «{leg.source_id}» находится внутри опасной зоны «{zone.name}»",
+                    zone_id=zone.id,
+                    required_m=zone.height_m + settings.vertical_clearance_m,
+                    actual_m=leg.source.level_m,
+                )
+                return ChainPlanResult(False, routes, [failure], leg)
+            if point_in_polygon(leg.destination.point, polygon) and not load_may_overfly(
+                zone, leg.destination.level_m, settings.vertical_clearance_m
+            ):
+                failure = RouteFailure(
+                    RouteFailureCode.DESTINATION_BLOCKED,
+                    f"Точка «{leg.destination_id}» находится внутри опасной зоны «{zone.name}»",
+                    zone_id=zone.id,
+                    required_m=zone.height_m + settings.vertical_clearance_m,
+                    actual_m=leg.destination.level_m,
+                )
+                return ChainPlanResult(False, routes, [failure], leg)
+        planned = plan_lift_route(
+            crane_point,
+            jib_length,
+            jib_bottom,
+            max_hook_height,
+            load,
+            leg.source,
+            leg.destination,
+            project,
+            lambda radius: allowed_capacity_kg(configuration, radius),
+            settings,
+            other_cranes,
+        )
+        if planned.route is None:
+            return ChainPlanResult(False, routes, planned.failures, leg)
+        routes.append(replace(planned.route, operation_id=leg.operation_id))
+    return ChainPlanResult(True, routes, [], None)
+
+
+def _logistics_reach_sufficient(covered: set[int], project: ProjectInput) -> bool:
+    if not project.site.unloading_zone and not project.site.storage_zones:
+        return True
+    storage_offset = 1 if project.site.unloading_zone else 0
+    if project.site.unloading_zone and 0 not in covered:
+        return False
+    if project.site.storage_zones:
+        return any(storage_offset + index in covered for index in range(len(project.site.storage_zones)))
+    return True
+
+
+def _plan_logistics_for_placement(
+    placement: Placement,
+    configuration: CraneConfiguration,
+    project: ProjectInput,
+    other_cranes: tuple[OtherCraneConstraint, ...] = (),
+) -> ChainPlanResult:
+    selected_routes = []
+    all_failures: list[RouteFailure] = []
+    failed_leg = None
+    settings = RoutePlannerSettings(
+        angle_step_deg=project.route_angle_step_deg,
+        radius_step_m=project.route_radius_step_m,
+        vertical_clearance_m=project.vertical_clearance_m,
+    )
+    unassigned = _unassigned_active_load_indices(project)
+    for work_index in placement.assigned_work_points:
+        work_point = project.work_points[work_index]
+        chains = build_logistics_chains(project.site, work_point, work_index=work_index)
+        if not chains:
+            continue
+        load_indices = [work_point.load_index] + [index for index in unassigned if index != work_point.load_index]
+        for load_index in load_indices:
+            chain_results: list[ChainPlanResult] = []
+            for chain in chains:
+                load_chain = [replace(leg, load_index=load_index) for leg in chain]
+                chain_results.append(
+                    evaluate_logistics_chain(placement, load_chain, project, settings, configuration, other_cranes)
+                )
+            safe_results = [result for result in chain_results if result.safe]
+            if safe_results:
+                def quality(result: ChainPlanResult) -> tuple[float, float]:
+                    accepted = [
+                        alternative
+                        for route in result.routes
+                        for alternative in route.alternatives
+                        if alternative.accepted
+                    ]
+                    clearance = min((item.min_clearance_m for item in accepted), default=0.0)
+                    length = sum(item.path_length_m for item in accepted)
+                    return (-clearance, length)
+
+                selected_routes.extend(min(safe_results, key=quality).routes)
+                continue
+            for chain, result in zip(chains, chain_results):
+                chain_name = " → ".join([chain[0].source_id] + [leg.destination_id for leg in chain])
+                for failure in result.failures:
+                    zone_suffix = f"; зона={failure.zone_id}" if failure.zone_id else ""
+                    all_failures.append(
+                        replace(
+                            failure,
+                            message=f"{chain_name}: {failure.message}{zone_suffix}",
+                        )
+                    )
+                if failed_leg is None:
+                    failed_leg = result.failed_leg
+            return ChainPlanResult(False, selected_routes, all_failures, failed_leg)
+    return ChainPlanResult(True, selected_routes, [], None)
+
+
+def _other_crane_constraint(placement: Placement, routes=()) -> OtherCraneConstraint:
+    sectors=((placement.allowed_sector_start_deg,placement.allowed_sector_end_deg),) if placement.allowed_sector_start_deg is not None and placement.allowed_sector_end_deg is not None else ((0.0,360.0),)
+    return OtherCraneConstraint(
+        placement.crane_id,
+        (placement.x,placement.y),
+        TOWER_PROTECTION_RADIUS_M,
+        placement.jib_level_m or placement.required_hook_height_m,
+        JIB_STRUCTURAL_HEIGHT_M,
+        tuple(routes),
+        sectors,
+        placement.jib_length_m,
+    )
+
+
 def _logistics_coverage(point: Point, config: CraneConfiguration, project: ProjectInput) -> tuple[set[int], list[str]]:
     """Вернуть доступные данному крану узлы грузового потока."""
     zones=_logistics_zones(project); covered: set[int]=set()
@@ -136,7 +389,7 @@ def _logistics_coverage(point: Point, config: CraneConfiguration, project: Proje
     for zone_index,(name, polygon) in enumerate(zones):
         target = polygon_centroid(polygon)
         radius = distance(point, target)
-        if radius > config.jib_length_m or not _ray_is_clear(point, target, project):
+        if radius > config.jib_length_m:
             continue
         zone_ok=True; zone_warnings=[]
         for load in (item for item in project.loads if item.active):
@@ -170,7 +423,7 @@ def _sample_building_contour(polygon: list[Point], spacing_m: float = 5.0) -> li
 
 
 def _contour_coverage(point: Point, config: CraneConfiguration, contour: list[Point], project: ProjectInput) -> set[int]:
-    return {index for index, target in enumerate(contour) if distance(point, target) <= config.jib_length_m + 1e-6 and _ray_is_clear(point, target, project)}
+    return {index for index, target in enumerate(contour) if distance(point, target) <= config.jib_length_m + 1e-6}
 
 
 def _mounted_jib_length(required_radius_m: float, maximum_jib_m: float) -> float | None:
@@ -483,7 +736,7 @@ def diagnose_no_solution(project: ProjectInput, configs: list[CraneConfiguration
 
 def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_variants: int = 3, step_m: float = 2.0) -> list[ScenarioResult]:
     geometry_issues=validate_polygon(project.site.boundary,"Граница площадки")+validate_polygon(project.site.building,"Контур здания")
-    for index,zone in enumerate(project.site.restricted_zones,1): geometry_issues+=validate_polygon(zone,f"Запретная зона {index}")
+    for zone in project.site.restricted_zones: geometry_issues+=validate_zone(zone)
     if geometry_issues:
         return [ScenarioResult("BLOCKED",[],geometry_issues,[])]
     if not polygon_inside_polygon(project.site.building,project.site.boundary):
@@ -507,19 +760,6 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
             return [ScenarioResult("BLOCKED",[],[f"{wp.name}: назначен груз, исключённый из проекта. Выберите активный груз либо удалите точку подачи."],[])]
         if wp.level_m > building_height + 0.5 and not wp.special_roof_load:
             return [ScenarioResult("BLOCKED",[],[f"{wp.name}: отметка {wp.level_m:.1f} м выше верха парапета {building_height:.1f} м. Исправьте отметку либо явно отметьте специальный подъём на кровлю."],[])]
-    unloading=[polygon_centroid(project.site.unloading_zone)] if project.site.unloading_zone else []
-    storage=[polygon_centroid(zone) for zone in project.site.storage_zones]
-    if unloading and storage:
-        low_danger=max(danger_zone_offset_from_outer_edge(1.0,load.largest_dimension_m) for load in project.loads if load.active)
-        for index,target in enumerate(storage,1):
-            if not any(_route_is_safe(source,target,project,low_danger) for source in unloading):
-                return [ScenarioResult("BLOCKED",[],[f"Маршрут от разгрузки к зоне складирования {index} пересекает запрет или выходит за допустимую границу"],[])]
-    sources=storage or unloading
-    if sources:
-        for index,wp in enumerate(project.work_points):
-            danger=max(danger_zone_offset_from_outer_edge(wp.level_m,load.largest_dimension_m) for load in _loads_for_work_point(project,index))
-            if not any(_route_is_safe(source,wp.point,project,danger) for source in sources):
-                return [ScenarioResult("BLOCKED",[],[f"{wp.name}: не найден безопасный маршрут подачи из зоны складирования/разгрузки"],[])]
     # Граница версии 1.x: в автоматическом подборе используются башенные краны
     # Liebherr EC-B. EC-H остаются в справочнике для будущего расширения.
     ec_b_configs=[config for config in configs if "EC-B" in config.model]
@@ -533,15 +773,49 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
     all_logistics=set(range(len(_logistics_zones(project))))
     configs_by_id={config.id:config for config in configs}
     scenarios: list[ScenarioResult] = []
+    route_diagnostics: list[RouteFailure] = []
 
-    for placement, warnings, contour_covered, logistics_covered in candidates:
-        if set(placement.assigned_work_points) == all_points and contour_covered == all_contour and logistics_covered == all_logistics:
-            targets=[wp.point for wp in project.work_points]+contour+[polygon_centroid(polygon) for _,polygon in _logistics_zones(project)]
+    for placement, warnings, contour_covered, logistics_covered in _compress_candidates(candidates):
+        if set(placement.assigned_work_points) == all_points and contour_covered == all_contour and _logistics_reach_sufficient(logistics_covered, project):
+            configuration = configs_by_id[placement.crane_id]
+            placement=replace(
+                placement,
+                assigned_contour_points=sorted(all_contour),
+                assigned_logistics_zones=sorted(logistics_covered),
+                jib_length_m=configuration.jib_length_m,
+            )
+            planned = _plan_logistics_for_placement(placement, configuration, project)
+            if not planned.safe:
+                route_diagnostics.extend(planned.failures)
+                continue
+            targets=[wp.point for wp in project.work_points]+contour+[waypoint.point for route in planned.routes for waypoint in route.waypoints]
             required_radius=max((distance((placement.x,placement.y),target) for target in targets),default=0.0)
-            mounted=_mounted_jib_length(required_radius,configs_by_id[placement.crane_id].jib_length_m)
+            mounted=_mounted_jib_length(required_radius,configuration.jib_length_m)
             if mounted is not None:
-                placement=replace(placement,assigned_contour_points=sorted(all_contour),assigned_logistics_zones=sorted(all_logistics),max_radius_m=required_radius,jib_length_m=mounted)
-                scenarios.append(ScenarioResult("PASS_WITH_CONDITIONS" if warnings else "PASS", [placement], [], sorted(set(warnings)), _duration(project, [placement])))
+                sozr_plan = build_sozr_plan(
+                    "K1",
+                    (placement.x, placement.y),
+                    mounted,
+                    project.site.restricted_zones,
+                    planned.routes,
+                    project,
+                    (placement.allowed_sector_start_deg, placement.allowed_sector_end_deg)
+                    if placement.allowed_sector_start_deg is not None and placement.allowed_sector_end_deg is not None else None,
+                )
+                placement=replace(
+                    placement,
+                    max_radius_m=required_radius,
+                    jib_length_m=mounted,
+                    sozr_plan=sozr_plan,
+                )
+                scenarios.append(ScenarioResult(
+                    "PASS_WITH_CONDITIONS" if warnings else "PASS",
+                    [placement],
+                    [],
+                    sorted(set(warnings)),
+                    _duration(project, [placement]),
+                    routes=planned.routes,
+                ))
 
     if len(scenarios) < max_variants or project.priority == "speed":
         best_candidates = sorted(_compress_candidates(candidates), key=lambda item: (-(len(item[0].assigned_work_points) + len(item[2]) + len(item[3])), item[0].crane_id))
@@ -565,8 +839,40 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
             if prepared is None:
                 continue
             pa,pb,joint_plan=prepared
+            planned_a = _plan_logistics_for_placement(pa, configs_by_id[pa.crane_id], project, (_other_crane_constraint(pb),))
+            planned_b = _plan_logistics_for_placement(pb, configs_by_id[pb.crane_id], project, (_other_crane_constraint(pa,planned_a.routes),))
+            if planned_b.safe:
+                planned_a = _plan_logistics_for_placement(pa, configs_by_id[pa.crane_id], project, (_other_crane_constraint(pb,planned_b.routes),))
+            if not planned_a.safe or not planned_b.safe:
+                route_diagnostics.extend(planned_a.failures)
+                route_diagnostics.extend(planned_b.failures)
+                continue
+            pa = replace(
+                pa,
+                sozr_plan=build_sozr_plan(
+                    "K1", (pa.x, pa.y), pa.jib_length_m, project.site.restricted_zones, planned_a.routes, project,
+                    (pa.allowed_sector_start_deg, pa.allowed_sector_end_deg)
+                    if pa.allowed_sector_start_deg is not None and pa.allowed_sector_end_deg is not None else None,
+                ),
+            )
+            pb = replace(
+                pb,
+                sozr_plan=build_sozr_plan(
+                    "K2", (pb.x, pb.y), pb.jib_length_m, project.site.restricted_zones, planned_b.routes, project,
+                    (pb.allowed_sector_start_deg, pb.allowed_sector_end_deg)
+                    if pb.allowed_sector_start_deg is not None and pb.allowed_sector_end_deg is not None else None,
+                ),
+            )
             warnings = sorted(set(wa + wb + ["Совместная работа допускается только по рассчитанным секторам, с разными уровнями стрел, координатной защитой и запретом одновременного входа двух грузов в общую зону"]))
-            scenarios.append(ScenarioResult("PASS_WITH_CONDITIONS", [pa, pb], [], warnings, _duration(project, [pa, pb]), joint_plan=joint_plan))
+            scenarios.append(ScenarioResult(
+                "PASS_WITH_CONDITIONS",
+                [pa, pb],
+                [],
+                warnings,
+                _duration(project, [pa, pb]),
+                joint_plan=joint_plan,
+                routes=planned_a.routes + planned_b.routes,
+            ))
             if len(scenarios)>=max(24,max_variants*8):
                 break
 
@@ -614,8 +920,17 @@ def optimize(project: ProjectInput, configs: list[CraneConfiguration], max_varia
                 covered, _, _, _ = _coverage((placement.x, placement.y), reserve, project)
                 contour_covered = _contour_coverage((placement.x, placement.y), reserve, contour, project)
                 logistics_covered,_=_logistics_coverage((placement.x,placement.y),reserve,project)
-                if set(covered) == all_points and contour_covered == all_contour and logistics_covered == all_logistics:
+                if set(covered) == all_points and contour_covered == all_contour and _logistics_reach_sufficient(logistics_covered, project):
                     scenario.warnings.append("130 EC-B 8 также подходит в этой позиции и может быть принят как резервная 8-тонная модель")
     if not unique:
+        if route_diagnostics:
+            unique_failures = list({(item.code, item.message, item.zone_id): item for item in route_diagnostics}.values())
+            return [ScenarioResult(
+                "BLOCKED",
+                [],
+                [item.message for item in unique_failures],
+                [],
+                route_failures=unique_failures,
+            )]
         return [ScenarioResult("BLOCKED", [], diagnose_no_solution(project, configs, step_m), [])]
     return unique

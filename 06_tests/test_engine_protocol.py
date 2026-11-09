@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from crane_plan.engine.catalog import CapacityPoint, CraneConfigurationV3
 from crane_plan.engine.constraints import ConstraintCode, OperationEvaluation, PlacementEvaluation
@@ -15,11 +16,14 @@ from crane_plan.engine.domain import (
     LoadSpec,
     ProjectSolutionV3,
     ProjectV3,
+    RestrictedZoneTypeV3,
+    RestrictedZoneV3,
+    RoutePlanningSettingsV3,
     SiteGeometry,
     SourceKind,
     SourceLocator,
 )
-from crane_plan.engine.protocol import build_protocol, canonical_json, save_protocol, sha256_hex
+from crane_plan.engine.protocol import build_protocol, canonical_json, save_protocol, save_protocol_atomic, sha256_hex
 from crane_plan.engine.verification import VerificationReport, VerificationStatus
 
 
@@ -62,6 +66,26 @@ def make_protocol(project: ProjectV3 | None = None):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_atomic_save_writes_canonical_json_without_temp_file(self):
+        protocol = make_protocol()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "reports" / "calculation_protocol_v21.json"
+            result = save_protocol_atomic(target, protocol)
+            self.assertEqual(result, target)
+            self.assertEqual(target.read_text(encoding="utf-8"), canonical_json(protocol) + "\n")
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_atomic_save_failure_preserves_existing_target_and_cleans_temp(self):
+        protocol = make_protocol()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "protocol.json"
+            target.write_text("original", encoding="utf-8")
+            with patch("crane_plan.engine.protocol.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    save_protocol_atomic(target, protocol)
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
     def test_identical_hashes_across_dictionary_ordering(self):
         self.assertEqual(sha256_hex({"a": 1, "b": 2}), sha256_hex({"b": 2, "a": 1}))
 
@@ -76,6 +100,28 @@ class ProtocolTests(unittest.TestCase):
         changed_load = replace(project.operations[0].load, load_kg=1001)
         changed_project = replace(project, operations=(replace(project.operations[0], load=changed_load),))
         self.assertNotEqual(make_protocol().input_sha256, make_protocol(changed_project).input_sha256)
+
+    def test_zone_height_and_route_grid_settings_change_input_hash(self):
+        project, _, _ = make_inputs()
+        polygon = ((2.0, -1.0), (3.0, -1.0), (3.0, 1.0), (2.0, 1.0))
+        zone = RestrictedZoneV3(
+            "Z1",
+            "Высотное препятствие",
+            RestrictedZoneTypeV3.HEIGHT_OBSTACLE,
+            polygon,
+            5.0,
+            0.0,
+            polygon,
+        )
+        with_zone = replace(project, site=replace(project.site, restricted_zones=(zone,)))
+        higher = replace(with_zone, site=replace(with_zone.site, restricted_zones=(replace(zone, height_m=6.0),)))
+        finer = replace(
+            with_zone,
+            route_settings=RoutePlanningSettingsV3(0.5, 0.25, 3.0, "SOZR-1.0"),
+        )
+
+        self.assertNotEqual(make_protocol(with_zone).input_sha256, make_protocol(higher).input_sha256)
+        self.assertNotEqual(make_protocol(with_zone).input_sha256, make_protocol(finer).input_sha256)
 
     def test_algorithm_normative_and_catalog_versions_are_mandatory(self):
         project, catalog, evaluations = make_inputs()

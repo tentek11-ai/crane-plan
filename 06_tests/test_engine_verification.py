@@ -14,6 +14,10 @@ from crane_plan.engine.domain import (
     OperationAssignment,
     ProjectSolutionV3,
     ProjectV3,
+    OperationRouteV3,
+    RestrictedZoneTypeV3,
+    RestrictedZoneV3,
+    RouteWaypointV3,
     SiteGeometry,
     SourceKind,
     SourceLocator,
@@ -75,6 +79,97 @@ def make_case() -> tuple[ProjectV3, dict[str, CraneConfigurationV3], ProjectSolu
 
 
 class IndependentVerifierTests(unittest.TestCase):
+    def test_danger_envelope_is_checked_on_every_route_edge(self):
+        project, catalog, solution = make_case()
+        config = replace(
+            catalog["CFG"], jib_length_m=50.0,
+            capacity_curve=(CapacityPoint(25, 5900), CapacityPoint(50, 5200)),
+            allowed_jib_lengths_m=(25, 30, 35, 40, 45, 50),
+        )
+        catalog = {"CFG": config}
+        source = LiftEndpoint(31.8198, -31.8198, 0)
+        destination = LiftEndpoint(31.8198, 31.8198, 20)
+        operation = replace(project.operations[0], source=source, destination=destination)
+        project = replace(project, operations=(operation,))
+        route = OperationRouteV3(
+            "OP1", "C1", 30.0,
+            (
+                RouteWaypointV3(source.x_m, source.y_m, 30.0, "hoist"),
+                RouteWaypointV3(destination.x_m, destination.y_m, 30.0, "slew"),
+            ),
+            "source", "destination",
+        )
+        solution = replace(solution, operation_routes=(route,))
+        report = verify_solution(project, catalog, solution)
+        failed = {check.code for check in report.checks if not check.passed}
+        self.assertIn("DANGER_ROUTE_INSIDE_SITE", failed)
+
+    def test_independent_verifier_rejects_other_tower_inside_jib_route_sector(self):
+        project,catalog,solution=make_case()
+        first=replace(solution.stages[0].placements[0],jib_bottom_m=20.0)
+        second=CranePlacementV3("C2","S1","CFG",10,0,jib_bottom_m=23.0)
+        stage=replace(solution.stages[0],placements=(first,second))
+        route=OperationRouteV3("OP1","C1",30,(RouteWaypointV3(5,0,30,"slew"),RouteWaypointV3(0,5,30,"slew")),"source","destination")
+        report=verify_solution(project,catalog,replace(solution,stages=(stage,),operation_routes=(route,)))
+        failed=[check for check in report.checks if check.code=="SECOND_CRANE_CONFLICT" and not check.passed]
+        self.assertTrue(failed)
+        self.assertIn("C2",str(failed[0].measured_value))
+
+    def test_independent_verifier_checks_tower_conflict_between_route_waypoints(self):
+        project, catalog, solution = make_case()
+        source = LiftEndpoint(19.696, -3.473, 0)
+        destination = LiftEndpoint(19.696, 3.473, 20)
+        project = replace(project, operations=(replace(project.operations[0], source=source, destination=destination),))
+        first = replace(solution.stages[0].placements[0], jib_bottom_m=20.0)
+        second = CranePlacementV3("C2", "S1", "CFG", 20, 0, jib_bottom_m=30.0)
+        stage = replace(solution.stages[0], placements=(first, second))
+        route = OperationRouteV3(
+            "OP1", "C1", 30,
+            (
+                RouteWaypointV3(source.x_m, source.y_m, 30, "hoist"),
+                RouteWaypointV3(destination.x_m, destination.y_m, 30, "slew"),
+            ),
+            "source", "destination",
+        )
+        report = verify_solution(project, catalog, replace(solution, stages=(stage,), operation_routes=(route,)))
+        failed = [check for check in report.checks if check.code == "SECOND_CRANE_CONFLICT" and not check.passed]
+        self.assertTrue(failed)
+        self.assertIn("C2", str(failed[0].measured_value))
+
+    def test_exact_route_verifier_catches_arc_crossing_between_safe_waypoints(self):
+        project, catalog, solution = make_case()
+        source = LiftEndpoint(20.0, -1.7431148549, 0)
+        destination = LiftEndpoint(20.0, 1.7431148549, 20)
+        operation = replace(project.operations[0], source=source, destination=destination)
+        thin_zone = RestrictedZoneV3(
+            "Z1",
+            "Тонкая зона",
+            RestrictedZoneTypeV3.FULL_EXCLUSION,
+            ((19.98, -0.05), (20.02, -0.05), (20.02, 0.05), (19.98, 0.05)),
+            5.0,
+            0.0,
+            ((19.98, -0.05), (20.02, -0.05), (20.02, 0.05), (19.98, 0.05)),
+        )
+        project = replace(project, operations=(operation,), site=replace(project.site, restricted_zones=(thin_zone,)))
+        route = OperationRouteV3(
+            "OP1",
+            "C1",
+            30.0,
+            (
+                RouteWaypointV3(source.x_m, source.y_m, 30.0, "hoist"),
+                RouteWaypointV3(destination.x_m, destination.y_m, 30.0, "slew"),
+            ),
+            "source",
+            "destination",
+        )
+        solution = replace(solution, operation_routes=(route,))
+
+        report = verify_solution(project, catalog, solution)
+
+        self.assertEqual(report.status, VerificationStatus.INVALID)
+        failed = {check.code for check in report.checks if not check.passed}
+        self.assertIn("ROUTE_EXACT_CLEAR", failed)
+
     def test_valid_solution_returns_valid(self):
         project, catalog, solution = make_case()
         report = verify_solution(project, catalog, solution)

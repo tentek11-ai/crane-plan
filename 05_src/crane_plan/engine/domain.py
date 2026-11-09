@@ -78,14 +78,68 @@ class LiftingOperation:
     sources: tuple[SourceLocator, ...]
 
 
+class RestrictedZoneTypeV3(str, Enum):
+    LOAD_PROHIBITED = "LOAD_PROHIBITED"
+    HEIGHT_OBSTACLE = "HEIGHT_OBSTACLE"
+    FULL_EXCLUSION = "FULL_EXCLUSION"
+
+
+@dataclass(frozen=True)
+class RestrictedZoneV3:
+    id: str
+    name: str
+    kind: RestrictedZoneTypeV3
+    polygon: tuple[Point2D, ...]
+    height_m: float
+    horizontal_clearance_m: float
+    buffered_polygon: tuple[Point2D, ...]
+
+    def __iter__(self):
+        return iter(self.polygon)
+
+    def __len__(self) -> int:
+        return len(self.polygon)
+
+    def __getitem__(self, index):
+        return self.polygon[index]
+
+
 @dataclass(frozen=True)
 class SiteGeometry:
     boundary: tuple[Point2D, ...]
     building: tuple[Point2D, ...]
-    restricted_zones: tuple[tuple[Point2D, ...], ...]
+    restricted_zones: tuple[RestrictedZoneV3, ...]
     min_crane_to_building_m: float
     max_crane_to_building_m: float
     sources: tuple[SourceLocator, ...]
+
+    def __post_init__(self) -> None:
+        normalized: list[RestrictedZoneV3] = []
+        for index, zone in enumerate(self.restricted_zones, start=1):
+            if isinstance(zone, RestrictedZoneV3):
+                normalized.append(zone)
+            else:
+                polygon = tuple(tuple(point) for point in zone)
+                normalized.append(
+                    RestrictedZoneV3(
+                        f"legacy-zone-{index}",
+                        f"Restricted zone {index}",
+                        RestrictedZoneTypeV3.FULL_EXCLUSION,
+                        polygon,
+                        0.0,
+                        0.0,
+                        polygon,
+                    )
+                )
+        object.__setattr__(self, "restricted_zones", tuple(normalized))
+
+
+@dataclass(frozen=True)
+class RoutePlanningSettingsV3:
+    angle_step_deg: float = 1.0
+    radius_step_m: float = 0.5
+    vertical_clearance_m: float = 3.0
+    algorithm_version: str = "SOZR-1.0"
 
 
 @dataclass(frozen=True)
@@ -98,6 +152,7 @@ class ProjectV3:
     operations: tuple[LiftingOperation, ...]
     normative_profile_id: str
     catalog_version: str
+    route_settings: RoutePlanningSettingsV3 = RoutePlanningSettingsV3()
     schema_version: int = 3
 
 
@@ -117,6 +172,7 @@ class CranePlacementV3:
     x_m: float
     y_m: float
     protective_measures: tuple[str, ...] = ()
+    jib_bottom_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -133,9 +189,28 @@ class StageSolutionV3:
 
 
 @dataclass(frozen=True)
+class RouteWaypointV3:
+    x_m: float
+    y_m: float
+    hook_height_m: float
+    movement: str
+
+
+@dataclass(frozen=True)
+class OperationRouteV3:
+    operation_id: str
+    placement_id: str
+    transport_hook_height_m: float
+    waypoints: tuple[RouteWaypointV3, ...]
+    source_id: str
+    destination_id: str
+
+
+@dataclass(frozen=True)
 class ProjectSolutionV3:
     project_id: str
     stages: tuple[StageSolutionV3, ...]
+    operation_routes: tuple[OperationRouteV3, ...] = ()
     schema_version: int = 3
     engine_version: str = "2.1"
 
@@ -152,6 +227,7 @@ class ProjectSolutionV3:
                     "x_m": placement.x_m,
                     "y_m": placement.y_m,
                     "protective_measures": sorted(placement.protective_measures),
+                    "jib_bottom_m": placement.jib_bottom_m,
                 }
                 for placement in sorted(stage.placements, key=lambda item: item.id)
             ]
@@ -174,6 +250,28 @@ class ProjectSolutionV3:
             "engine_version": self.engine_version,
             "project_id": self.project_id,
             "stages": stage_rows,
+            "operation_routes": [
+                {
+                    "operation_id": route.operation_id,
+                    "placement_id": route.placement_id,
+                    "transport_hook_height_m": route.transport_hook_height_m,
+                    "source_id": route.source_id,
+                    "destination_id": route.destination_id,
+                    "waypoints": [
+                        {
+                            "x_m": waypoint.x_m,
+                            "y_m": waypoint.y_m,
+                            "hook_height_m": waypoint.hook_height_m,
+                            "movement": waypoint.movement,
+                        }
+                        for waypoint in route.waypoints
+                    ],
+                }
+                for route in sorted(
+                    self.operation_routes,
+                    key=lambda item: (item.operation_id, item.placement_id),
+                )
+            ],
         }
 
 
@@ -266,7 +364,7 @@ def validate_project(project: ProjectV3) -> tuple[InputIssue, ...]:
     for polygon_name, polygons in (
         ("boundary", (site.boundary,)),
         ("building", (site.building,)),
-        ("restricted_zones", site.restricted_zones),
+        ("restricted_zones", tuple(zone.polygon for zone in site.restricted_zones)),
     ):
         for polygon_index, polygon in enumerate(polygons):
             base = f"site.{polygon_name}" if polygon_name != "restricted_zones" else f"site.{polygon_name}[{polygon_index}]"
@@ -275,6 +373,26 @@ def validate_project(project: ProjectV3) -> tuple[InputIssue, ...]:
                     issue = _finite_issue(point[axis_index], f"{base}[{point_index}].{axis}")
                     if issue:
                         issues.append(issue)
+    for zone_index, zone in enumerate(site.restricted_zones):
+        for name in ("height_m", "horizontal_clearance_m"):
+            issue = _finite_issue(getattr(zone, name), f"site.restricted_zones[{zone_index}].{name}")
+            if issue:
+                issues.append(issue)
+        if zone.height_m < 0 or zone.horizontal_clearance_m < 0:
+            issues.append(
+                InputIssue(
+                    "NEGATIVE_ZONE_DIMENSION",
+                    f"site.restricted_zones[{zone_index}]",
+                    "Zone height and horizontal clearance must be non-negative.",
+                )
+            )
+    for name in ("angle_step_deg", "radius_step_m", "vertical_clearance_m"):
+        value = getattr(project.route_settings, name)
+        issue = _finite_issue(value, f"route_settings.{name}")
+        if issue:
+            issues.append(issue)
+        elif value <= 0 and name != "vertical_clearance_m" or value < 0:
+            issues.append(InputIssue("INVALID_ROUTE_SETTING", f"route_settings.{name}", "Route setting is out of range."))
     issues.extend(_source_issues(site.sources, "site.sources"))
     return tuple(issues)
 
@@ -357,4 +475,13 @@ def validate_solution_structure(
             issues.append(
                 InputIssue("ASSIGNMENT_DUPLICATE", f"operations[{operation_id}]", "Operation is assigned more than once.")
             )
+    operation_ids = set(operations)
+    for route_index, route in enumerate(solution.operation_routes):
+        base = f"operation_routes[{route_index}]"
+        if route.operation_id not in operation_ids:
+            issues.append(InputIssue("UNKNOWN_OPERATION", f"{base}.operation_id", f"Unknown operation: {route.operation_id}"))
+        if route.placement_id not in placement_ids:
+            issues.append(InputIssue("UNKNOWN_PLACEMENT", f"{base}.placement_id", f"Unknown placement: {route.placement_id}"))
+        if len(route.waypoints) < 2:
+            issues.append(InputIssue("ROUTE_WAYPOINTS_REQUIRED", f"{base}.waypoints", "At least two route waypoints are required."))
     return tuple(issues)

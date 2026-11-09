@@ -6,19 +6,40 @@ import json
 from pathlib import Path
 
 from .models import CraneConfiguration
+from .user_cranes import load_user_cranes
 
 
-def load_catalog(path: str | Path) -> list[CraneConfiguration]:
+def _configuration(item: dict) -> CraneConfiguration:
+    return CraneConfiguration(
+        id=item["id"], model=item["model"], priority=item["priority"],
+        jib_length_m=item["jib_length_m"], max_capacity_kg=item["max_capacity_kg"],
+        max_free_standing_hook_height_m=item["max_free_standing_hook_height_m"],
+        capacity_curve=tuple((float(r), float(q)) for r, q in item["capacity_curve"]),
+        source=item["source"],
+    )
+
+
+def load_catalog(
+    path: str | Path,
+    user_catalog_path: str | Path | None = None,
+) -> list[CraneConfiguration]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    result = []
-    for item in data["configurations"]:
-        result.append(CraneConfiguration(
-            id=item["id"], model=item["model"], priority=item["priority"],
-            jib_length_m=item["jib_length_m"], max_capacity_kg=item["max_capacity_kg"],
-            max_free_standing_hook_height_m=item["max_free_standing_hook_height_m"],
-            capacity_curve=tuple((float(r), float(q)) for r, q in item["capacity_curve"]),
-            source=item["source"],
-        ))
+    result = [_configuration(item) for item in data["configurations"]]
+    if user_catalog_path is not None:
+        known_ids = {item.id for item in result}
+        for index, item in enumerate(load_user_cranes(user_catalog_path)):
+            if item.get("id") in known_ids:
+                raise ValueError(f"Повтор идентификатора крана: {item.get('id')}")
+            protected = {
+                **item,
+                "priority": 1000 + index,
+                "source": (
+                    "USER_INPUT: характеристики введены пользователем; "
+                    "требуется экспертная проверка"
+                ),
+            }
+            result.append(_configuration(protected))
+            known_ids.add(item["id"])
     return sorted(result, key=lambda c: c.priority)
 
 
