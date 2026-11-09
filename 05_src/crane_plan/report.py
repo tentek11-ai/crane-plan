@@ -1074,7 +1074,8 @@ def generate_report(
     output.parent.mkdir(parents=True, exist_ok=True)
     # Use the local temp root to avoid deep GUI-report paths on Windows. Neither
     # planning nor raster/vector rendering may reopen the mutable source paths.
-    with TemporaryDirectory(prefix=".pprk-underlays-") as snapshots:
+    from .runtime_paths import writable_temp_root
+    with TemporaryDirectory(dir=writable_temp_root(), prefix=".pprk-underlays-") as snapshots:
         rendering_project = snapshot_underlays(project, snapshots)
         if bundle is not None:
             return _generate_report(output, rendering_project, scenarios, selected_pages,

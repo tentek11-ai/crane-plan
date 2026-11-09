@@ -41,12 +41,13 @@ from .pprk_release_workflow import (
 )
 from .report import generate_report
 from .restricted_zones import validate_zone
+from .runtime_paths import writable_temp_root
 from .sozr_canvas import build_sozr_canvas_primitives, draw_sozr_canvas
 from .user_cranes import add_user_crane, build_user_crane_payload, delete_user_crane, load_user_cranes
 from .zone_editor import ZONE_KIND_LABELS, edit_restricted_zone
 
 
-APP_VERSION = "3.0.1"
+APP_VERSION = "3.0.2"
 APP_TITLE = f"КранПлан {APP_VERSION} — BIM-среда предварительной расстановки башенных кранов"
 
 
@@ -1536,13 +1537,16 @@ class CranePlanApp(tk.Tk):
             self.section_canvas.create_line(*self.section_contour_pixels[-1],*self.section_contour_pixels[0],fill="#00bcd4",width=3,tags="section_building")
 
     def choose_plan(self):
-        path = filedialog.askopenfilename(title="Выберите векторный PDF-план", filetypes=[("PDF", "*.pdf")])
+        path = filedialog.askopenfilename(title="Выберите PDF-план", filetypes=[("PDF", "*.pdf")])
         if not path: return
         try:
             inspection = inspect_pdf(path)
             if not inspection.likely_vector:
-                messagebox.showerror("Не векторный PDF", "В документе недостаточно векторных элементов. Растровые сканы в первой версии не поддерживаются.")
-                return
+                messagebox.showwarning(
+                    "Растровая PDF-подложка",
+                    "В документе недостаточно распознаваемых векторных элементов. "
+                    "PDF будет загружен как подложка: выполните обрезку и масштабирование вручную.",
+                )
             self.plan_pdf = path
             self._mark_calculation_changed()
             self.plan_crop_box=(0.0,0.0,1.0,1.0); self._clear_plan_geometry()
@@ -2512,7 +2516,7 @@ class CranePlanApp(tk.Tk):
                 project, scenario, verification, _ = inputs
                 draft = replace(project, pprk_release=replace(project.pprk_release, status=ReleaseStatus.PRELIMINARY))
                 view = prepare_release(draft, scenario, verification)
-            temp = TemporaryDirectory(prefix="craneplan_preview_")
+            temp = TemporaryDirectory(dir=writable_temp_root(), prefix="craneplan_preview_")
             preview_path = Path(temp.name) / "preview.pdf"
             self.status.set("Формируется предпросмотр полного ППРк…")
             self.update_idletasks()

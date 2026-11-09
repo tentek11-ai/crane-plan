@@ -12,7 +12,7 @@ from .protocol import CalculationProtocolV3, build_protocol
 from .verification import VerificationReport, VerificationStatus, verify_solution
 
 
-ENGINE_VERSION = "3.0.1"
+ENGINE_VERSION = "3.0.2"
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ from .pprk_models import ApprovalSlot, CompletenessIssue, PPRKReleaseConfig, Rel
 from .pprk_templates import DEFAULT_REGISTRY_PATH, TemplateCatalogError, load_template_catalog
 from .report import generate_report
 from .pprk_release_validation import ForbiddenReferenceError, UnsafePDFMetadataError, validate_release_inputs, validate_release_pdf, validate_underlays
+from .runtime_paths import writable_temp_root
 
 
 RELEASE_FIELDS = {
@@ -235,7 +236,7 @@ def _preflight_internal_text(bundle, appendices, documents):
         if document.present:
             for title in external_contents_titles(document, len(PdfReader(document.attachment_path).pages)):
                 _draw_cell_text(proof, title, 0, 0, 138 * mm, 7 * mm, font_size=7)
-    with TemporaryDirectory(prefix=".pprk-text-proof-") as directory:
+    with TemporaryDirectory(dir=writable_temp_root(), prefix=".pprk-text-proof-") as directory:
         render_pprk_text_report(Path(directory) / "proof.pdf", replace(bundle, contents=()))
 
 

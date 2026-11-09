@@ -3,7 +3,7 @@ import unittest
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -69,6 +69,37 @@ class DummyEngineResult:
 
 
 class AppEngineIntegrationTests(unittest.TestCase):
+    def test_low_vector_pdf_is_loaded_as_manual_background(self):
+        app = object.__new__(CranePlanApp)
+        app.plan_pdf = None
+        app.plan_label = MagicMock()
+        app.status = MagicMock()
+        app._mark_calculation_changed = MagicMock()
+        app._clear_plan_geometry = MagicMock()
+        app._show_plan = MagicMock()
+        app._update_properties = MagicMock()
+        inspection = SimpleNamespace(
+            likely_vector=False,
+            pages=1,
+            vector_lines=0,
+            vector_rects=0,
+            text_chars=0,
+        )
+
+        with (
+            patch.object(app_module.filedialog, "askopenfilename", return_value="C:/tmp/scan.pdf"),
+            patch.object(app_module, "inspect_pdf", return_value=inspection),
+            patch.object(app_module.messagebox, "showerror") as showerror,
+            patch.object(app_module.messagebox, "showwarning") as showwarning,
+        ):
+            app.choose_plan()
+
+        self.assertEqual(app.plan_pdf, "C:/tmp/scan.pdf")
+        app._show_plan.assert_called_once_with()
+        showerror.assert_not_called()
+        showwarning.assert_called_once()
+        self.assertIn("ручн", showwarning.call_args.args[1].lower())
+
     def test_user_can_select_warning_and_acceptance_enters_protocol(self):
         app = object.__new__(CranePlanApp)
         app.scenarios = [ScenarioResult("PASS_WITH_CONDITIONS", [], [], ["первое", "второе"])]
